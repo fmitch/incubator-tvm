@@ -31,6 +31,9 @@ from .. import feature
 from ..util import get_rank
 from .metric import max_curve, recall_curve, cover_curve
 from .model_based_tuner import CostModel, FeatureCache
+from .tuner import SavedFeature, cache_sizes
+from .data_volume_estimator import estimate_dv
+import tvm
 
 logger = logging.getLogger('autotvm')
 
@@ -87,6 +90,8 @@ class XGBoostCostModel(CostModel):
         self.num_threads = num_threads
         self.log_interval = log_interval
 
+        self.saved_features = {'scores':[]}
+
         if loss_type == 'reg':
             self.xgb_params = {
                 'max_depth': 3,
@@ -125,6 +130,10 @@ class XGBoostCostModel(CostModel):
 
         if feature_type == 'itervar':
             self.feature_extract_func = _extract_itervar_feature_index
+        elif feature_type == 'datavol':
+            self.feature_extract_func = _extract_datavol_feature_index
+        elif feature_type == 'datavol_itervar':
+            self.feature_extract_func = _extract_datavol_itervar_feature_index
         elif feature_type == 'knob':
             self.feature_extract_func = _extract_knob_feature_index
         elif feature_type == 'curve':
@@ -196,6 +205,11 @@ class XGBoostCostModel(CostModel):
             else:
                 dtrain.set_base_margin(discount * self.base_model.predict(xs, output_margin=True))
 
+        # Get scores for testing datavol features
+        if self.bst != None:
+            scores = self.bst.predict(dtrain)
+            self.saved_features['scores'].append((xs.copy(), scores))
+
         self.bst = xgb.train(self.xgb_params, dtrain,
                              num_boost_round=8000,
                              callbacks=[custom_callback(
@@ -207,6 +221,7 @@ class XGBoostCostModel(CostModel):
                                      xgb_average_recalln_curve_score(plan_size),
                                  ],
                                  verbose_eval=self.log_interval)])
+
 
         logger.debug("XGB train: %.2f\tobs: %d\terror: %d\tn_cache: %d",
                      time.time() - tic, len(xs),
@@ -306,10 +321,16 @@ class XGBoostCostModel(CostModel):
         need_extract = [x for x in indexes if x not in fea_cache]
 
         if need_extract:
+            feas = []
             pool = self._get_pool()
             feas = pool.map(self.feature_extract_func, need_extract)
             for i, fea in zip(need_extract, feas):
-                fea_cache[i] = fea
+                fea_cache[i] = fea[0]
+                if i in self.saved_features.keys():
+                    self.saved_features[i].set_feature(fea[0])
+                    self.saved_features[i].set_config(fea[1])
+                else:
+                    self.saved_features[i] = SavedFeature(config=fea[1], feature=fea[0])
 
         feature_len = None
         for idx in indexes:
@@ -339,9 +360,68 @@ def _extract_itervar_feature_index(index):
             sch, args = _extract_task.instantiate(config)
         fea = feature.get_itervar_feature_flatten(sch, args, take_log=True)
         fea = np.concatenate((fea, list(config.get_other_option().values())))
-        return fea
+        return fea, config
     except Exception:  # pylint: disable=broad-except
         return None
+
+def _extract_datavol_itervar_feature_index(index):
+    try:
+        config = _extract_space.get(index)
+        config_features = []
+        for param in config.to_json_dict()['entity']:
+            if param[1] == 'sp':
+                config_features += param[-1][1:]
+            elif param[1] == 'an':
+                for setting in param[-1]:
+                    config_features += [int(setting != 'none')]
+        with _extract_target:
+            sch, args = _extract_task.instantiate(config)
+        fea = feature.get_itervar_feature_flatten(sch, args, take_log=True)
+        d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
+                config.array_dims, cache_sizes, config.conv_dims)
+        flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
+        d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
+                config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
+        flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
+        return np.concatenate((fea, list(config.get_other_option().values()), flat_volume, config_features)), config.to_json_dict()
+    except Exception:
+        return None
+
+def _extract_datavol_feature_index(index):
+    #try:
+    config = _extract_space.get(index)
+    config_features = []
+    for param in config.to_json_dict()['entity']:
+        if param[1] == 'sp':
+            config_features += param[-1][1:]
+        elif param[1] == 'an':
+            for setting in param[-1]:
+                config_features += [int(setting != 'none')]
+    with _extract_target:
+        # Get schedule and args, which initializes config to contain schedule info.
+        sch, args = _extract_task.instantiate(config)
+        #func = tvm.build(sch, args, target='c')
+        #src = func.get_source()
+        #filename = "conv_src/src"
+        #for dim in _extract_task.args[0][1]:
+        #    filename += str(dim) + '_'
+        #for dim in _extract_task.args[1][1]:
+        #    filename += str(dim) + '_'
+        #for dim in config.get_flatten_feature():
+        #    if dim != -1:
+        #        filename += str(int(dim)) + '_'
+        #filename += '.c'
+        #with open(filename, 'w') as fi:
+        #    fi.write(src)
+    d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
+            config.array_dims, cache_sizes, config.conv_dims)
+    flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
+    d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
+            config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
+    flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
+    return np.concatenate((flat_volume, config_features)), config.to_json_dict()
+    #except Exception:
+    #    return None
 
 def _extract_itervar_feature_log(arg):
     """extract iteration var feature for log items"""

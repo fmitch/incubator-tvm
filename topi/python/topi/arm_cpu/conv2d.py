@@ -28,8 +28,10 @@ from .. import nn
 from ..nn.util import get_const_int, get_pad_tuple
 from ..nn.winograd_util import winograd_transform_matrices
 from .conv2d_spatial_pack import conv2d_spatial_pack_nchw, \
+    conv2d_spatial_pack_nchw_dv, \
     conv2d_spatial_pack_nhwc, \
     schedule_conv2d_spatial_pack_nchw, \
+    schedule_conv2d_spatial_pack_nchw_dv, \
     schedule_conv2d_spatial_pack_nhwc
 from .cortex_m7.conv2d import direct_simd
 
@@ -65,6 +67,43 @@ def schedule_conv2d_nchw_spatial_pack(cfg, outs):
                 s[kernel].compute_inline()
 
             schedule_conv2d_spatial_pack_nchw(cfg, s, data_vec, kernel_vec,
+                                              conv, output, outs[0])
+
+    traverse_inline(s, outs[0].op, _callback)
+    return s
+
+
+@autotvm.register_topi_compute("conv2d_nchw_spatial_pack.dv.x86")
+def conv2d_nchw_spatial_pack(cfg, data, kernel, strides, padding, dilation, out_dtype):
+    """Compute conv2d with NCHW layout"""
+    return conv2d_spatial_pack_nchw_dv(cfg, data, kernel, strides, padding,
+                                    dilation, out_dtype, num_tile=2)
+
+
+@autotvm.register_topi_schedule("conv2d_nchw_spatial_pack.dv.x86")
+def schedule_conv2d_nchw_spatial_pack(cfg, outs):
+    """Create schedule for conv2d_nchw"""
+    s = te.create_schedule([x.op for x in outs])
+
+    def _callback(op):
+        # schedule conv2d
+        if 'spatial_conv2d_output' in op.tag:
+            output = op.output(0)
+            conv = op.input_tensors[0]
+
+            data_vec = conv.op.input_tensors[0]
+            data_pad = data_vec.op.input_tensors[0]
+            s[data_pad].compute_inline()
+
+            kernel_vec = conv.op.input_tensors[1]
+            if kernel_vec.op.name == 'kernel_vec':
+                kernel = kernel_vec.op.input_tensors[0]
+            else:
+                kernel = kernel_vec
+            if isinstance(kernel.op, tvm.te.ComputeOp) and "dilate" in kernel.op.tag:
+                s[kernel].compute_inline()
+
+            schedule_conv2d_spatial_pack_nchw_dv(cfg, s, data_vec, kernel_vec,
                                               conv, output, outs[0])
 
     traverse_inline(s, outs[0].op, _callback)

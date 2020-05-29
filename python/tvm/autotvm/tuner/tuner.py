@@ -24,8 +24,33 @@ from ..measure import MeasureInput, create_measure_batch
 from ..util import format_si_prefix
 
 from ..env import GLOBAL_SCOPE
+from .data_volume_estimator import estimate_dv
+
+import subprocess
 
 logger = logging.getLogger('autotvm')
+import tvm
+
+cache_sizes = [
+        int(subprocess.run(['getconf', 'LEVEL1_DCACHE_SIZE'], stdout=subprocess.PIPE).stdout)//64,
+        int(subprocess.run(['getconf', 'LEVEL2_CACHE_SIZE'], stdout=subprocess.PIPE).stdout)//64,
+        int(subprocess.run(['getconf', 'LEVEL3_CACHE_SIZE'], stdout=subprocess.PIPE).stdout)//64]
+
+class SavedFeature:
+    def __init__(self, config=None, feature=None, result=None):
+        self.config = config
+        self.feature = feature
+        self.result = result
+
+    def set_result(self, result):
+        self.result = result
+
+    def set_config(self, config):
+        self.config = config
+
+    def set_feature(self, feature):
+        self.feature = feature
+
 
 class Tuner(object):
     """Base class for tuners
@@ -33,9 +58,7 @@ class Tuner(object):
     Parameters
     ----------
     task: autotvm.task.Task
-        Tuning Task
-    """
-
+        Tuning Task """ 
     def __init__(self, task, **kwargs):
         self.param = kwargs
         self.recorder = None
@@ -121,6 +144,15 @@ class Tuner(object):
 
         GLOBAL_SCOPE.in_tuning = True
         i = error_ct = 0
+
+        # Get arrays for conv
+        N, CI, H, W = self.task.args[0][1]
+        CO, _, KH, KW = self.task.args[1][1]
+        padding = self.task.args[3]
+        a_tvm = tvm.nd.array(np.random.uniform(size=(N,CI,H,W) ).astype(np.float32))
+        w_tvm = tvm.nd.array(np.random.uniform(size=(CO,CI,KH,KW) ).astype(np.float32))
+        c_tvm = tvm.nd.array(np.zeros((N,CO,H+KH-2*padding-1,W+KW-2*padding-1), dtype=np.float32))
+
         while i < n_trial:
             if not self.has_next():
                 break
@@ -149,11 +181,23 @@ class Tuner(object):
                 logger.debug("No: %d\t%sFLOPS: %.2f/%.2f\tresult: %s\t%s",
                              i + k + 1, si_prefix, format_si_prefix(flops, si_prefix),
                              format_si_prefix(self.best_flops, si_prefix), res, config)
-
+                
             i += len(results)
             self.ttl = min(early_stopping + self.best_iter, n_trial) - i
 
             self.update(inputs, results)
+
+            for k, (inp, res) in enumerate(zip(inputs, results)):
+                sch, args = self.task.instantiate(inp.config)
+                func = tvm.build(sch, args)
+                #LIKWID PERFCTR
+                func(c_tvm, w_tvm, a_tvm)
+                #END LIKWID PERFCTR
+                if inp.config.index in self.cost_model.saved_features.keys():
+                    self.cost_model.saved_features[inp.config.index].set_result(res)
+                else:
+                    self.cost_model.saved_features[inp.config.index] = SavedFeature(result=res)
+
             for callback in callbacks:
                 callback(self, inputs, results)
 
