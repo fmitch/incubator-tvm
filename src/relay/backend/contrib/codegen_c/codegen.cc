@@ -56,6 +56,25 @@ class CodegenC : public MemoizedExprTranslator<std::vector<Output>>, public Code
     return {output};
   }
 
+  std::vector<Output> VisitExpr_(const TupleNode* node) final {
+    std::vector<Output> outs;
+    for (auto field : node->fields) {
+      auto res = VisitExpr(field);
+      CHECK_EQ(res.size(), 1U) << "Do not support tuple nest";
+      outs.push_back(res[0]);
+    }
+    return outs;
+  }
+
+  std::vector<Output> VisitExpr_(const TupleGetItemNode* op) final {
+    auto res = VisitExpr(op->tuple);
+    CHECK_GT(res.size(), static_cast<size_t>(op->index));
+
+    // Only keep the item we want for the child node.
+    // FIXME(@comaniac): The other items should still be requried for the primary outputs.
+    return {res[op->index]};
+  }
+
   std::vector<Output> VisitExpr_(const ConstantNode* cn) final {
     // Note this is for demonstration purpose. ConstantNode doesn't necessarily
     // belong to calls. We need to revisit this when tuples come into play.
@@ -151,8 +170,8 @@ class CodegenC : public MemoizedExprTranslator<std::vector<Output>>, public Code
     for (size_t i = 0; i < out_shape.size(); ++i) {
       out_size *= out_shape[i];
     }
-    buf_stream << dtype << "* " << out <<
-      " = (" << dtype << "*)std::malloc(4 * " << out_size << ");";
+    buf_stream << dtype << "* " << out << " = (" << dtype << "*)std::malloc(4 * " << out_size
+               << ");";
     buf_decl_.push_back(buf_stream.str());
 
     decl_stream << ", " << out << ");";

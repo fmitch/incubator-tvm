@@ -114,7 +114,12 @@ class FuncOp(OpWrapper):
     def __call__(self, args, attrs, type_args):
         if attrs is None:
             attrs = {}
-        x = self.operator(*args, **{k: self.convert(v) for k, v in attrs.items()})
+        if self.operator is op.reshape:
+            x = self.operator(*args)
+        elif self.operator in (op.zeros, op.ones, op.full, op.broadcast_to):
+            x = self.operator(*args, dtype=attrs["dtype"])
+        else:
+            x = self.operator(*args, **{k: self.convert(v) for k, v in attrs.items()})
         if isinstance(x, expr.TupleWrapper):
             x = x.astuple()
         return x

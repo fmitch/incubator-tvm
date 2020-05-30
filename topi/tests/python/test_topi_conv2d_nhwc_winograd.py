@@ -137,7 +137,11 @@ def test_conv2d_nhwc_winograd_direct():
 
 def test_conv2d_nhwc_winograd_tensorcore():
     """Test the conv2d with winograd for nhwc layout"""
-    print("test_winograd_tensorcore...")
+    if not tvm.gpu(0).exist or not tvm.runtime.enabled("cuda"):
+        print("skip because cuda is not enabled..")
+        return
+    if not nvcc.have_tensorcore(tvm.gpu(0).compute_version):
+        return
     verify_conv2d_nhwc(8,  64, 56,  64, 3, 1, 1, bgemm="tensorcore")
     verify_conv2d_nhwc(8, 128, 28, 128, 3, 1, 1, bgemm="tensorcore")
     verify_conv2d_nhwc(8, 256, 14, 256, 3, 1, 1, bgemm="tensorcore")
@@ -145,8 +149,7 @@ def test_conv2d_nhwc_winograd_tensorcore():
     verify_conv2d_nhwc(2,  64, 56,  64, 3, 1, (1, 1), add_relu=True, bgemm="tensorcore")
     verify_conv2d_nhwc(2,  64, 56,  64, 3, 1, "SAME", add_relu=True, bgemm="tensorcore")
 
+
 if __name__ == "__main__":
     test_conv2d_nhwc_winograd_direct()
-
-    if nvcc.have_tensorcore(tvm.gpu(0).compute_version):
-        test_conv2d_nhwc_winograd_tensorcore()
+    test_conv2d_nhwc_winograd_tensorcore()

@@ -56,6 +56,7 @@ PACKAGE_VERSION = {
     'intel_graphics':   "v0.02",
 
     'vta':              "v0.08",
+    'amd_apu':          "v0.01",
 }
 
 logger = logging.getLogger('autotvm')
@@ -66,8 +67,10 @@ def _alias(name):
         'vtacpu': 'vta',
 
         'metal': 'opencl',
+        'webgpu': 'opencl',
         'vulkan': 'opencl',
         'nvptx': 'cuda',
+        'amd_apu': 'amd_apu'
     }
     return table.get(name, name)
 

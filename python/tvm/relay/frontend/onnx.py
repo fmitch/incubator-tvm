@@ -325,7 +325,6 @@ class Conv(OnnxOpConverter):
     def _impl_v1(cls, inputs, attr, params):
         # Use shape of input to determine convolution type.
         input_shape = infer_shape(inputs[0])
-
         if 'auto_pad' in attr:
             attr['auto_pad'] = attr['auto_pad'].decode('utf-8')
             if attr['auto_pad'] in ('SAME_UPPER', 'SAME_LOWER'):
@@ -350,7 +349,10 @@ class Conv(OnnxOpConverter):
             attr.pop('auto_pad')
         elif len(attr['kernel_shape']) == 2:
             sym_pad = True
-            padding = attr['pads']
+            if 'pads' in attr:
+                padding = attr['pads']
+            else:
+                padding = [0, 0, 0, 0]
             for i in range(0, len(padding), 2):
                 sym_pad = sym_pad and padding[i] == padding[i + 1]
 
@@ -460,6 +462,10 @@ class Gemm(OnnxOpConverter):
         inputs[0] = _op.nn.batch_flatten(inputs[0])
         out = _op.nn.dense(_expr.const(alpha) * inputs[0],
                            inputs[1], units=channels)
+        # skip (beta * C) if zero
+        C_array = params[inputs[2].name_hint].asnumpy()
+        if (beta == 0.0) or np.array_equal(C_array, np.array([0])):
+            return out
         return _op.nn.bias_add(out, _expr.const(beta) * inputs[2])
 
 
@@ -499,6 +505,57 @@ class MaxPool(Pool):
     """ Operator converter for MaxPool
     """
     name = 'max_pool'
+
+class LpPool(OnnxOpConverter):
+    """ A helper class for lppool op converters.
+    """
+    @classmethod
+    def _impl_v1(cls, inputs, attr, params):
+        input_shape = infer_shape(inputs[0])
+        dtype = infer_type(inputs[0]).checked_type.dtype
+
+        if 'auto_pad' in attr:
+            attr['auto_pad'] = attr['auto_pad'].decode('utf-8')
+            if attr['auto_pad'] in ('SAME_UPPER', 'SAME_LOWER'):
+                pad_tuple = []
+                for axis in range(len(input_shape) - 2):
+                    axis_shape = input_shape[2 + axis]
+                    stride = attr['strides'][axis]
+                    kernel = attr['kernel_shape'][axis]
+                    pad = get_pad_pair(axis_shape, kernel, stride)
+                    pad_tuple.append(pad)
+                pad_tuple = tuple([val for pair in zip(*pad_tuple) for val in pair])
+                attr['pads'] = pad_tuple
+            elif attr['auto_pad'] == 'VALID':
+                attr['pads'] = 0
+            elif attr['auto_pad'] == 'NOTSET':
+                pass
+            else:
+                msg = 'Value {} in attribute "auto_pad" of operator {} is invalid.'
+                raise tvm.error.OpAttributeInvalid(msg.format(attr['auto_pad'], "LpPool"))
+            attr.pop("auto_pad")
+
+        if 'storage_order' in attr:
+            attr['layout'] = onnx_storage_order2layout(attr['storage_order'],
+                                                       dims=(len(input_shape) - 2))
+        else:
+            attr['layout'] = onnx_default_layout(dims=(len(input_shape) - 2))
+
+        p = _expr.const(attr['p'], dtype)
+        reci_p = _expr.const(1.0 / attr['p'], dtype)
+        inputs[0] = _op.power(inputs[0], p)
+
+        out = AttrCvt(op_name=dimension_picker("avg_pool"),
+                      transforms={
+                          'kernel_shape': 'pool_size',
+                          'pads': ('padding', 0)
+                      },
+                      extras={'count_include_pad': True},
+                      ignores=['p'],
+                      custom_check=dimension_constraint())(inputs, attr, params)
+        kernels = attr['kernel_shape']
+        out = _op.abs(out) * _expr.const(np.prod(kernels).astype(dtype))
+        return _op.power(out, reci_p)
 
 
 class Mul(Elemwise):
@@ -556,6 +613,31 @@ class Pad(OnnxOpConverter):
                 'value': 'pad_value',
             },
             )(inputs, attr, params)
+
+    @classmethod
+    def _impl_v11(cls, inputs, attr, params):
+        pad_width = []
+        pads = infer_value_simulated(inputs[1], params).asnumpy()
+        if len(inputs) == 3:
+            value = infer_value_simulated(inputs[2], params).asnumpy().item()
+        else:
+            value = 0
+        attr["pad_value"] = value
+        dims = int(len(pads) / 2)
+        for i in range(dims):
+            pad_width.append((pads[i], pads[i+dims]))
+        attr['pad_width'] = pad_width
+        pad_mode = attr.get('mode', b'constant').decode('utf-8')
+        if pad_mode in ['constant', 'edge', 'reflect']:
+            attr['pad_mode'] = pad_mode
+            attr.pop('mode', None)
+        else:
+            raise tvm.error.OpAttributeInvalid(
+                'Value ' + pad_mode + ' in attribute "mode" is invalid for operator Pad.')
+
+        return AttrCvt('pad')(inputs[:1], attr, params)
+
+
 
 
 class ParametricSoftPlus(OnnxOpConverter):
@@ -621,7 +703,7 @@ class Reshape(OnnxOpConverter):
     def _impl_v5(cls, inputs, attr, params):
         if get_name(inputs[1]) in params:
             # pop shape out of parameters since it wont be needed later.
-            shape = tuple(params.pop(inputs[1].name_hint).asnumpy())
+            shape = tuple(params.pop(inputs[1].name_hint).asnumpy().astype("int32"))
             out = _op.reshape(inputs[0], shape)
         else:
             data, shape = inputs
@@ -1076,6 +1158,11 @@ class ReduceProd(Reduce):
     """
     name = 'prod'
 
+class ReduceLogSumExp(Reduce):
+    """ Operator converter for ReduceLogSumExp.
+    """
+    name = 'logsumexp'
+
 class ArgMax(OnnxOpConverter):
     """ Operator converter for ArgMax.
     """
@@ -1485,6 +1572,8 @@ class NonZero(OnnxOpConverter):
             raise ValueError("Expect 1 input only")
 
         output = AttrCvt(op_name='argwhere')(inputs, attr, params)
+        # ONNX NonZero always outputs int64
+        output = _op.cast(output, "int64")
         return _op.transpose(output, axes=(1, 0))
 
 class TopK(OnnxOpConverter):
@@ -1593,6 +1682,17 @@ def _get_convert_map(opset):
         'Greater': Greater.get_converter(opset),
         'Less': Less.get_converter(opset),
         'Log': Renamer('log'),
+        'ACos': Renamer('acos'),
+        'ACosh': Renamer('acosh'),
+        'ASin': Renamer('asin'),
+        'ASinh': Renamer('asinh'),
+        'ATan': Renamer('atan'),
+        'ATanh': Renamer('atanh'),
+        'Cos': Renamer('cos'),
+        'Cosh': Renamer('cosh'),
+        'Sin': Renamer('sin'),
+        'Sinh': Renamer('sinh'),
+        'Tan': Renamer('tan'),
         'Tanh': Renamer('tanh'),
         'Pow': Renamer('power'),
         'PRelu': Prelu.get_converter(opset),
@@ -1615,6 +1715,7 @@ def _get_convert_map(opset):
 
         # defs/nn
         'AveragePool': AveragePool.get_converter(opset),
+        'LpPool': LpPool.get_converter(opset),
         'MaxPool': MaxPool.get_converter(opset),
         'Conv': Conv.get_converter(opset),
         'ConvTranspose': ConvTranspose.get_converter(opset),
@@ -1638,8 +1739,7 @@ def _get_convert_map(opset):
         'ReduceSum': ReduceSum.get_converter(opset),
         'ReduceMean': ReduceMean.get_converter(opset),
         'ReduceProd': ReduceProd.get_converter(opset),
-        # 'ReduceProd'
-        # 'ReduceLogSumExp'
+        'ReduceLogSumExp': ReduceLogSumExp.get_converter(opset),
 
         #defs/sorting
         'ArgMax': ArgMax.get_converter(opset),

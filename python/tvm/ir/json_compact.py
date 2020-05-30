@@ -111,7 +111,8 @@ def create_updater_06_to_07():
         "EnvFunc": _update_global_key,
         "relay.Op": _update_global_key,
         "relay.TypeVar": [_ftype_var, _update_from_std_str("name_hint")],
-        "relay.GlobalTypeVar": _ftype_var,
+        "relay.Id": [_update_from_std_str("name_hint")],
+        "relay.GlobalTypeVar": [_ftype_var, _update_from_std_str("name_hint")],
         "relay.Type": _rename("Type"),
         "relay.TupleType": _rename("TupleType"),
         "relay.TypeConstraint": _rename("TypeConstraint"),
@@ -122,15 +123,15 @@ def create_updater_06_to_07():
         "relay.Module": _rename("IRModule"),
         "relay.SourceName": _rename("SourceName"),
         "relay.Span": _rename("Span"),
-        "relay.GlobalVar": _rename("GlobalVar"),
+        "relay.GlobalVar": [_rename("GlobalVar"), _update_from_std_str("name_hint")],
         "relay.Pass": _rename("transform.Pass"),
         "relay.PassInfo": _rename("transform.PassInfo"),
         "relay.PassContext": _rename("transform.PassContext"),
         "relay.ModulePass": _rename("transform.ModulePass"),
         "relay.Sequential": _rename("transform.Sequential"),
         # TIR
-        "Variable": _update_tir_var("tir.Var"),
-        "SizeVar": _update_tir_var("tir.SizeVar"),
+        "Variable": [_update_tir_var("tir.Var"), _update_from_std_str("name")],
+        "SizeVar": [_update_tir_var("tir.SizeVar"), _update_from_std_str("name")],
     }
     return create_updater(node_map, "0.6", "0.7")
 
