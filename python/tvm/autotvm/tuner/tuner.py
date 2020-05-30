@@ -30,6 +30,7 @@ import subprocess
 
 logger = logging.getLogger('autotvm')
 import tvm
+import pylikwid
 
 cache_sizes = [
         int(subprocess.run(['getconf', 'LEVEL1_DCACHE_SIZE'], stdout=subprocess.PIPE).stdout)//64,
@@ -37,10 +38,11 @@ cache_sizes = [
         int(subprocess.run(['getconf', 'LEVEL3_CACHE_SIZE'], stdout=subprocess.PIPE).stdout)//64]
 
 class SavedFeature:
-    def __init__(self, config=None, feature=None, result=None):
+    def __init__(self, config=None, feature=None, result=None, counters=None):
         self.config = config
         self.feature = feature
         self.result = result
+        self.counters = counters
 
     def set_result(self, result):
         self.result = result
@@ -50,6 +52,9 @@ class SavedFeature:
 
     def set_feature(self, feature):
         self.feature = feature
+
+    def set_counters(self, counters):
+        self.counters = counters
 
 
 class Tuner(object):
@@ -111,7 +116,7 @@ class Tuner(object):
         """
 
 
-    def tune(self, n_trial, measure_option, early_stopping=None, callbacks=(), si_prefix='G'):
+    def tune(self, n_trial, measure_option, early_stopping=None, callbacks=(), si_prefix='G', likwid_event=None):
         """Begin tuning
 
         Parameters
@@ -190,13 +195,51 @@ class Tuner(object):
             for k, (inp, res) in enumerate(zip(inputs, results)):
                 sch, args = self.task.instantiate(inp.config)
                 func = tvm.build(sch, args)
+
                 #LIKWID PERFCTR
-                func(c_tvm, w_tvm, a_tvm)
-                #END LIKWID PERFCTR
-                if inp.config.index in self.cost_model.saved_features.keys():
-                    self.cost_model.saved_features[inp.config.index].set_result(res)
+                if likwid_event != None:
+                    eventset = "CACHE"
+                    pylikwid.inittopology()
+                    cpu_topo = pylikwid.getcputopology()
+                    cpus = list(range(cpu_topo['activeHWThreads']))
+                    pylikwid.finalizetopology()
+
+                    err = pylikwid.init(cpus)
+                    if err > 0:
+                        logger.debug("Cannot initialize LIKWID")
+                    group = pylikwid.addeventset(likwid_event)
+                    if group >= 0:
+                        logger.debug("Eventset {} added with ID {}".format(likwid_event, group,))
+                    else:
+                        logger.debug("Failed to add eventset {}".format(likwid_event))
+                    err = pylikwid.setup(group)
+                    if err < 0:
+                        logger.debug("Setup of group {} failed".format(group))
+                    err = pylikwid.start()
+                    if err < 0:
+                        logger.debug("Start of group {} failed".format(group))
+                    func(c_tvm, w_tvm, a_tvm)
+                    err = pylikwid.stop()
+                    if err < 0:
+                        logger.debug("Stop of group {} failed".format(group))
+                    likwid_results = []
+                    for thread in range(0,len(cpus)):
+                        likwid_results.append({})
+                        for event_num in range(pylikwid.getnumberofevents(group)):
+                            likwid_results[-1][pylikwid.getnameofevent(group, event_num)] = pylikwid.getresult(group,event_num, thread)
+                    pylikwid.finalize()
+                    #END LIKWID PERFCTR
+
+                    if inp.config.index in self.cost_model.saved_features.keys():
+                        self.cost_model.saved_features[inp.config.index].set_result(res)
+                        self.cost_model.saved_features[inp.config.index].set_counters(likwid_results)
+                    else:
+                        self.cost_model.saved_features[inp.config.index] = SavedFeature(result=res, counters=likwid_results)
                 else:
-                    self.cost_model.saved_features[inp.config.index] = SavedFeature(result=res)
+                    if inp.config.index in self.cost_model.saved_features.keys():
+                        self.cost_model.saved_features[inp.config.index].set_result(res)
+                    else:
+                        self.cost_model.saved_features[inp.config.index] = SavedFeature(result=res)
 
             for callback in callbacks:
                 callback(self, inputs, results)
