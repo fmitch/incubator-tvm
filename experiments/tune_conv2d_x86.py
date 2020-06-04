@@ -28,8 +28,8 @@ tuning_option = {
     'early_stopping': None,
 
     'measure_option': autotvm.measure_option(
-        builder=autotvm.LocalBuilder(timeout=100, n_parallel=8),
-        runner=autotvm.LocalRunner(repeat=1,number=5, timeout=100),
+        builder=autotvm.LocalBuilder(timeout=100, n_parallel=1 ),
+        runner=autotvm.LocalRunner(repeat=5,number=10, timeout=100),
     ),
 }
 
@@ -71,12 +71,12 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, lo
         #feature_type = 'datavol_itervar'
     print('Feature:',feature_type)
     for i in range(1):
-        tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank', plan_size=16)
+        tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank', plan_size=64)
         tuner.tune(n_trial=trials,
                    measure_option=measure_option,
                    callbacks=[
                        autotvm.callback.progress_bar(trials),
-                       autotvm.callback.log_to_file(log_filename)],likwid_event='CACHE')
+                       autotvm.callback.log_to_file(log_filename)],likwid_event='CACHES')
     #with open('data/%s_features_1core_%i_n%i_%i.pkl' % (feature_type, H, N, trials) , 'wb') as output:
     with open('data/likwid_test.pkl' , 'wb') as output:
         pickle.dump([task, tuner.cost_model.saved_features], output, pickle.HIGHEST_PROTOCOL)
@@ -106,6 +106,8 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, lo
     func(c_tvm, w_tvm, a_tvm)
 
     tvm.testing.assert_allclose(c_np, c_tvm.asnumpy(), rtol=1e-2)
+    evaluator = func.time_evaluator(func.entry_name, ctx, number=10)
+    print(evaluator(c_tvm, w_tvm, a_tvm))
 
 def tune_and_evaluate(tuning_opt):
     print("strat tuning...")
@@ -127,8 +129,8 @@ def tune_and_evaluate(tuning_opt):
 
 
     dilation = 1;
-    N, H, W, CO, CI, KH, KW, strides, padding, dilation = 1, 56, 56, 128, 64, 3, 3, 1, 1, 1
-    trials = 64 
+    N, H, W, CO, CI, KH, KW, strides, padding, dilation = 4, 56, 56, 128, 64, 3, 3, 1, 1, 1
+    trials = 512
     log_file = 'conv.log'
 
     print("N, H, W, CO, CI, KH, KW, strides, padding \n" , N, H, W, CO, CI, KH, KW, strides, padding)

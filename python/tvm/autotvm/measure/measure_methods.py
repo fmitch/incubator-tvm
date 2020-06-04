@@ -496,7 +496,7 @@ def run_through_rpc(measure_input, build_result,
         if len(costs) > 2:  # remove largest and smallest value to reduce variance
             costs = list(costs)
             costs.sort()
-            costs = tuple(costs[1:-1])
+            #costs = tuple(costs[1:-1])
 
         # check correctness of output
         if ref_output:
