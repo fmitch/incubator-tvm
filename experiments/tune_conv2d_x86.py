@@ -43,7 +43,8 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, lo
 
     origin_layout = 'NCHW'
 
-    func_create = 'conv2d_nchw_spatial_pack.dv.x86'
+    func_create = 'conv2d_NCHW_dv.x86'
+    #func_create = 'conv2d_nchw_spatial_pack.dv.x86'
     task = autotvm.task.create(func_create,
                                args=(data, kernel, strides, padding, 1, 'float32'),
                                target='llvm -mcpu=core-avx2')
@@ -71,15 +72,15 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, lo
         #feature_type = 'datavol_itervar'
     print('Feature:',feature_type)
     for i in range(1):
-        tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank', plan_size=64)
+        tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank', plan_size=8)
         tuner.tune(n_trial=trials,
                    measure_option=measure_option,
                    callbacks=[
                        autotvm.callback.progress_bar(trials),
-                       autotvm.callback.log_to_file(log_filename)],likwid_event='CACHES')
+                       autotvm.callback.log_to_file(log_filename)],likwid_event='CACHE')
     #with open('data/%s_features_1core_%i_n%i_%i.pkl' % (feature_type, H, N, trials) , 'wb') as output:
-    with open('data/likwid_test.pkl' , 'wb') as output:
-        pickle.dump([task, tuner.cost_model.saved_features], output, pickle.HIGHEST_PROTOCOL)
+    #with open('data/likwid_test.pkl' , 'wb') as output:
+    #    pickle.dump([task, tuner.cost_model.saved_features], output, pickle.HIGHEST_PROTOCOL)
 
     dispatch_context = autotvm.apply_history_best(log_filename)
     best_config = dispatch_context.query(task.target, task.workload)
@@ -91,7 +92,7 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, lo
         with tvm.target.create("llvm -mcpu=core-avx2"):
             s, arg_bufs = task.func(*task.args)
             func = tvm.build(s, arg_bufs)
-            print(tvm.lower(s, arg_bufs, simple_mode=True))
+            #print(tvm.lower(s, arg_bufs, simple_mode=True))
     
     ctx = tvm.cpu()
     a_np = np.random.uniform(size=(N, CI, H, W)).astype(np.float32)
@@ -130,7 +131,7 @@ def tune_and_evaluate(tuning_opt):
 
     dilation = 1;
     N, H, W, CO, CI, KH, KW, strides, padding, dilation = 4, 56, 56, 128, 64, 3, 3, 1, 1, 1
-    trials = 512
+    trials = 16
     log_file = 'conv.log'
 
     print("N, H, W, CO, CI, KH, KW, strides, padding \n" , N, H, W, CO, CI, KH, KW, strides, padding)

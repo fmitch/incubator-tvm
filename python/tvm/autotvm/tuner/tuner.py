@@ -167,10 +167,8 @@ class Tuner(object):
 
             configs = self.next_batch(min(n_parallel, n_trial - i))
 
-            t0 = time.time()
             inputs = [MeasureInput(self.task.target, self.task, config) for config in configs]
             results = measure_batch(inputs)
-            print('Result time', time.time()-t0)
 
             # keep best config
             for k, (inp, res) in enumerate(zip(inputs, results)):
@@ -208,23 +206,17 @@ class Tuner(object):
                 err = pylikwid.setup(group)
 
             for k, (inp, res) in enumerate(zip(inputs, results)):
-                print('RPC Results', res.costs)
-                t1 = time.time()
                 with inp.target:
                     sch, args = self.task.instantiate(inp.config)
                     #with tvm.ir.transform.PassContext():
                     func = tvm.build(sch, args, target_host=inp.task.target_host)
-                    t2 = time.time()
-                    #print('Rebuild time', t2-t1)
-                    #func(c_tvm, w_tvm, a_tvm)
-                    #print('Func time', time.time()-t1)
                     evaluator = func.time_evaluator(func.entry_name, ctx=ctx, number=10)
                     #print('Time Evaluator Results', evaluator(c_tvm, w_tvm, a_tvm).results)
 
                 #LIKWID PERFCTR
                 if likwid_event != None:
                     err = pylikwid.start()
-                    print('Time Evaluator Results', evaluator(c_tvm, w_tvm, a_tvm).results)
+                    evaluator(c_tvm, w_tvm, a_tvm)
                     err = pylikwid.stop()
                     likwid_results = []
                     for thread in range(0,len(cpus)):

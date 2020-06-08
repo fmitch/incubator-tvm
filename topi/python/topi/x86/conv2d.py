@@ -160,7 +160,11 @@ def conv2d_NCHW_dv(cfg, data, kernel, strides, padding, dilation, out_dtype):
     oh = (ih - kernel_height + pt + pb) // sh + 1
     ow = (iw - kernel_width + pl + pr) // sw + 1
 
-    ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
+    # ================== Define configuration space ===================
+    n = cfg.axis(n)
+    kh, kw = cfg.reduce_axis(kernel_height), cfg.reduce_axis(kernel_width)
+
+    ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
     co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
     oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64,
                      policy="verbose")
@@ -173,12 +177,13 @@ def conv2d_NCHW_dv(cfg, data, kernel, strides, padding, dilation, out_dtype):
         cfg.define_knob("unroll_kw", [True, False])
 
     cfg.define_reorder('reorder_0', 
-            [n, ci, co, oh, ow, vci, kernel_height, kernel_width, vh, vw, vc],
+            [n, ci, co, oh, ow, vci, kh, kw, vh, vw, vco],
             policy='candidate', candidate=[
-                [n, ci, co, oh, ow, vci, kernel_height, kernel_width, vh, vw, vc],
-                [n, ci, co, oh, ow, vci, kernel_height, kernel_width, vc, vh, vw],
-                [n, co, oh, ow, ci, vci, kernel_height, kernel_width, vc, vh, vw],
-                [n, oh, ow, ci, vci, co, kernel_height, kernel_width, vc, vh, vw]
+                #[n, ci, co, oh, ow, vci, kh, kw, vh, vw, vco],
+                #[n, ci, co, oh, ow, vci, kh, kw, vco, vh, vw],
+                [n, co, oh, ow, ci, vci, kh, kw, vco, vh, vw],
+                [n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco]
+                #[n, oh, ow, ci, vci, co, kh, kw, vco, vh, vw]
                 ])
 
     # If no config was set, we can fallback to default config.
@@ -205,7 +210,7 @@ def conv2d_NCHW_dv(cfg, data, kernel, strides, padding, dilation, out_dtype):
     #    else:
     #        data, kernel = _pack_data(cfg, data, kernel)
 
-    return nn.conv2d_NCHWc(data,
+    return nn.conv2d_nchw(data,
                            kernel,
                            strides,
                            padding,
@@ -283,7 +288,7 @@ def schedule_conv2d_NCHW_dv(cfg, outs):
     s = te.create_schedule([x.op for x in outs])
 
     def _callback(op):
-        if 'conv2d_NCHWc_dv' in op.tag:
+        if 'conv2d_nchw' in op.tag:
             conv_out = op.output(0)
             kernel_vec = conv_out.op.input_tensors[1]
             data_vec = conv_out.op.input_tensors[0]
