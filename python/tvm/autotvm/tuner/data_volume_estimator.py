@@ -1,6 +1,6 @@
 import numpy as np
 
-def estimate_dv(loop_order, num_iters, inds, cache_sizes, conv_inds, arrays=['In_conv', 'K', 'O'], word_size=4, line_size=64, use_full_footprint=True):
+def estimate_dv(loop_order, num_iters, inds, cache_sizes, conv_inds, fastest_varying, arrays=['In_conv', 'K', 'O'], word_size=4, line_size=64, use_full_footprint=True):
     """ Estimate data volume using loop iterators, arrays, and cache capacities.
 
     Paramters
@@ -15,7 +15,7 @@ def estimate_dv(loop_order, num_iters, inds, cache_sizes, conv_inds, arrays=['In
         In order, Input, Kernel, Output, or same as arrays=['I', 'K', 'O']
         Must be of same type as loop_order.
     cache_sizes: list(ind)
-        Size of each cache level, in words, from lowest to highest: [L1, L2, L3, ...]
+        Size of each cache level, in bytes, from lowest to highest: [L1, L2, L3, ...]
     conv_inds: list( list(tuple(), tuple()) )
         List of list of two tuples, where each tuple contains keys from loop_order
         for the input and kernel keys corresponding to a dimension of convolution.
@@ -26,7 +26,7 @@ def estimate_dv(loop_order, num_iters, inds, cache_sizes, conv_inds, arrays=['In
         the second dimension.
         Keys must be the same type as in loop_order and inds
     """
-    cache_sizes = np.array(cache_sizes)
+    cache_sizes = np.array(cache_sizes) / line_size
     assert(len(inds) == len(arrays))
     counter = 0
     conv_ranges = np.ones((len(conv_inds), 2))
@@ -40,6 +40,7 @@ def estimate_dv(loop_order, num_iters, inds, cache_sizes, conv_inds, arrays=['In
 
     num_iters = list(np.array(num_iters)[loop_order]) + [1]
     loop_order = loop_order.copy() + ['op']
+    extra_lines = np.zeros(len(arrays))
     d_foot_lower = np.ones((len(arrays), len(loop_order)))
     d_foot_prob = np.ones((len(arrays), len(loop_order)))
     d_foot_upper = np.ones((len(arrays), len(loop_order)))
@@ -57,16 +58,49 @@ def estimate_dv(loop_order, num_iters, inds, cache_sizes, conv_inds, arrays=['In
             if loop in inds[arr_ind] and arr != 'In_conv':
                 if loop == inds[arr_ind][-1]:
                     if num_iters[loop_ind] % L == 0:
-                        remainder = L
+                        extra_lines[arr_ind] = np.ceil(num_iters[loop_ind]/L) + (L - 1) / L
                     else:
-                        remainder = num_iters[loop_ind] % L
-                    d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L))
-                    d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L) + 1)
-                    d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L) + (remainder - 1 ) / L )
-                    for level, _ in enumerate(cache_sizes):
-                        d_vol_lower[arr_ind, level, loop_ind] = d_foot_lower[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L) )
-                        d_vol_upper[arr_ind, level, loop_ind] = d_foot_upper[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L) + 1 )
-                        d_vol_prob[arr_ind, level, loop_ind] = d_foot_prob[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L)  + ((num_iters[loop_ind] % L) - 1 ) / L )
+                        extra_lines[arr_ind] = np.ceil(num_iters[loop_ind]/L) + ((num_iters[loop_ind] % L) - 1)/L
+                    d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1] * (np.ceil(num_iters[loop_ind]/L))
+                    d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1] * (np.ceil(num_iters[loop_ind]/L) + 1)
+                    d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind-1] * extra_lines[arr_ind]
+                    for level, cache_size in enumerate(cache_sizes):
+                        lower_foot_sum = d_foot_lower[arr_ind, loop_ind]
+                        upper_foot_sum = d_foot_upper[arr_ind, loop_ind]
+                        prob_foot_sum = d_foot_prob[arr_ind, loop_ind]
+                        if use_full_footprint:
+                            for arr_ind_other, _ in enumerate(arrays):
+                                if arr_ind != arr_ind_other:
+                                    lower_foot_sum += d_foot_lower[arr_ind_other, loop_ind-1]
+                                    upper_foot_sum += d_foot_upper[arr_ind_other, loop_ind-1]
+                                    prob_foot_sum += d_foot_prob[arr_ind_other, loop_ind-1]
+                        if prob_foot_sum < cache_size:
+                            d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1] * (np.ceil(num_iters[loop_ind]/L) )
+                            d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1] * (np.ceil(num_iters[loop_ind]/L) + 1 )
+                            d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1] * extra_lines[arr_ind]
+                        else:
+                            d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1] * num_iters[loop_ind]
+                            d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1] * num_iters[loop_ind]
+                            d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1] * num_iters[loop_ind]
+                elif loop in fastest_varying[arr_ind]:
+                    small_loop = num_iters[loop_order.index(inds[arr_ind][-1])]
+                    if small_loop <= L/2:
+                        d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1]*num_iters[loop_ind]*small_loop/L
+                        d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1]*num_iters[loop_ind]*(1+small_loop)/L
+                        d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind-1]*num_iters[loop_ind]*extra_lines[arr_ind]*small_loop/L
+                        for level, _ in enumerate(cache_sizes):
+                            d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1]*num_iters[loop_ind]*small_loop/L
+                            d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1]*num_iters[loop_ind]*(1+small_loop)/L
+                            d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1]*num_iters[loop_ind]*(extra_lines[arr_ind] % 1 + small_loop)/L
+                    else:
+                        d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1]*num_iters[loop_ind]
+                        d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1]*num_iters[loop_ind]
+                        d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind-1]*num_iters[loop_ind]/extra_lines[arr_ind] * int(extra_lines[arr_ind]) + extra_lines[arr_ind]% 1
+                        for level, _ in enumerate(cache_sizes):
+                            d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1]*num_iters[loop_ind]
+                            d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1]*num_iters[loop_ind]
+                            d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1]*num_iters[loop_ind]/extra_lines[arr_ind] * int(extra_lines[arr_ind]) + extra_lines[arr_ind]%1
+
                 else:
                     d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1]*num_iters[loop_ind]
                     d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1]*num_iters[loop_ind]
@@ -85,16 +119,36 @@ def estimate_dv(loop_order, num_iters, inds, cache_sizes, conv_inds, arrays=['In
                 if loop not in sum(sum(conv_inds, []),()):
                     if loop == inds[arr_ind][-1]:
                         if num_iters[loop_ind] % L == 0:
-                            remainder = L
+                            extra_lines[arr_ind] = np.ceil(num_iters[loop_ind]/L) + (L - 1) / L
                         else:
-                            remainder = num_iters[loop_ind] % L
-                        d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L))
-                        d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L) + 1)
-                        d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L) + (remainder - 1 ) / L )
+                            extra_lines[arr_ind] = np.ceil(num_iters[loop_ind]/L) + ((num_iters[loop_ind] % L) - 1)/L
+                        d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1] * (np.ceil(num_iters[loop_ind]/L))
+                        d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1] * (np.ceil(num_iters[loop_ind]/L) + 1)
+                        d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind-1] * extra_lines[arr_ind]
                         for level, _ in enumerate(cache_sizes):
-                            d_vol_lower[arr_ind, level, loop_ind] = d_foot_lower[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L) )
-                            d_vol_upper[arr_ind, level, loop_ind] = d_foot_upper[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L) + 1 )
-                            d_vol_prob[arr_ind, level, loop_ind] = d_foot_prob[arr_ind, loop_ind] * (np.ceil(num_iters[loop_ind]/L)  + (remainder - 1 ) / L )
+                            d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1] * (np.ceil(num_iters[loop_ind]/L) )
+                            d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1] * (np.ceil(num_iters[loop_ind]/L) + 1 )
+                            d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1] * extra_lines[arr_ind]
+
+                    elif loop in fastest_varying[arr_ind]:
+                        small_loop = num_iters[loop_order.index(inds[arr_ind][-1])]
+                        if small_loop <= L/2:
+                            d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1]*num_iters[loop_ind]*small_loop/L
+                            d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1]*num_iters[loop_ind]*(1+small_loop)/L
+                            d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind-1]*num_iters[loop_ind]*extra_lines[arr_ind]*small_loop/L
+                            for level, _ in enumerate(cache_sizes):
+                                d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1]*num_iters[loop_ind]*small_loop/L
+                                d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1]*num_iters[loop_ind]*(1+small_loop)/L
+                                d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1]*num_iters[loop_ind]*(extra_lines[arr_ind] % 1 + small_loop)/L
+                        else:
+                            d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1]*num_iters[loop_ind]
+                            d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1]*num_iters[loop_ind]
+                            d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind-1]*num_iters[loop_ind]/extra_lines[arr_ind] * int(extra_lines[arr_ind]) + extra_lines[arr_ind]% 1
+                            for level, _ in enumerate(cache_sizes):
+                                d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1]*num_iters[loop_ind]
+                                d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1]*num_iters[loop_ind]
+                                d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1]*num_iters[loop_ind]/extra_lines[arr_ind] * int(extra_lines[arr_ind]) + extra_lines[arr_ind]%1
+
                     else:
                         d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1]*num_iters[loop_ind]
                         d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1]*num_iters[loop_ind]
@@ -110,16 +164,40 @@ def estimate_dv(loop_order, num_iters, inds, cache_sizes, conv_inds, arrays=['In
                     mul_factor = (new_range + conv_ranges[counter,other_key]-1)/(conv_ranges[counter,key] + conv_ranges[counter,other_key]-1)
                     if loop == inds[arr_ind][-1]:
                         if mul_factor % L < 1:
-                            remainder = L
+                            extra_lines[arr_ind] = np.ceil(mul_factor/L) + (L - 1) / L
                         else:
-                            remainder = mul_factor % L
-                        d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind] * (np.ceil(mul_factor/L) )
-                        d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind] * (np.ceil(mul_factor/L) + 1 )
-                        d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind] * (np.ceil(mul_factor/L) + (remainder - 1 ) / L )
+                            extra_lines[arr_ind] = np.ceil(mul_factor/L) + ((mul_factor % L) - 1)/L
+                        d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1] * (np.ceil(mul_factor/L) )
+                        d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1] * (np.ceil(mul_factor/L) + 1 )
+                        d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind-1] * extra_lines[arr_ind]
                         for level, _ in enumerate(cache_sizes):
                             d_vol_lower[arr_ind, level, loop_ind] = (np.ceil(mul_factor/L) )
                             d_vol_upper[arr_ind, level, loop_ind] = (np.ceil(mul_factor/L) + 1 )
-                            d_vol_prob[arr_ind, level, loop_ind] =  (np.ceil(mul_factor/L)  + (remainder - 1 ) / L )
+                            d_vol_prob[arr_ind, level, loop_ind] =  extra_lines[arr_ind]
+
+
+
+
+                    elif loop in fastest_varying[arr_ind]:
+                        small_loop = num_iters[loop_order.index(inds[arr_ind][-1])] + 2
+                        if small_loop <= L/2:
+                            d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1]*mul_factor*small_loop/L
+                            d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1]*mul_factor*(1+small_loop)/L
+                            d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind-1]*mul_factor*extra_lines[arr_ind]*small_loop/L
+                            for level, _ in enumerate(cache_sizes):
+                                d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1]*mul_factor*small_loop/L
+                                d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1]*mul_factor*(1+small_loop)/L
+                                d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1]*mul_factor*(extra_lines[arr_ind] % 1 + small_loop)/L
+                        else:
+                            d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1]*mul_factor
+                            d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1]*mul_factor
+                            d_foot_prob[arr_ind, loop_ind] = d_foot_prob[arr_ind, loop_ind-1]*mul_factor/extra_lines[arr_ind] * int(extra_lines[arr_ind]) + extra_lines[arr_ind]% 1
+                            for level, _ in enumerate(cache_sizes):
+                                d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1]*mul_factor
+                                d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1]*mul_factor
+                                d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1]*mul_factor/extra_lines[arr_ind] * int(extra_lines[arr_ind]) + extra_lines[arr_ind]%1
+
+
                     else:
                         d_foot_lower[arr_ind, loop_ind] = d_foot_lower[arr_ind, loop_ind-1]*mul_factor
                         d_foot_upper[arr_ind, loop_ind] = d_foot_upper[arr_ind, loop_ind-1]*mul_factor
@@ -134,15 +212,23 @@ def estimate_dv(loop_order, num_iters, inds, cache_sizes, conv_inds, arrays=['In
             if loop not in inds[arr_ind]:
                 for level, cache_size in enumerate(cache_sizes):
                     if use_full_footprint:
-                        if d_foot_lower[:,loop_ind].sum() < cache_size:
+                        lower_foot_sum = d_foot_lower[arr_ind, loop_ind]
+                        upper_foot_sum = d_foot_upper[arr_ind, loop_ind]
+                        prob_foot_sum = d_foot_prob[arr_ind, loop_ind]
+                        for arr_ind_other, _ in enumerate(arrays):
+                            if arr_ind != arr_ind_other:
+                                lower_foot_sum += d_foot_lower[arr_ind_other, loop_ind-1]
+                                upper_foot_sum += d_foot_upper[arr_ind_other, loop_ind-1]
+                                prob_foot_sum += d_foot_prob[arr_ind_other, loop_ind-1]
+                        if lower_foot_sum < cache_size:
                             d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1]
                         else:
                             d_vol_lower[arr_ind, level, loop_ind] = d_vol_lower[arr_ind, level, loop_ind-1]*num_iters[loop_ind]
-                        if d_foot_upper[:,loop_ind].sum() < cache_size:
+                        if upper_foot_sum < cache_size:
                             d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1]
                         else:
                             d_vol_upper[arr_ind, level, loop_ind] = d_vol_upper[arr_ind, level, loop_ind-1]*num_iters[loop_ind]
-                        if d_foot_prob[:,loop_ind].sum() < cache_size:
+                        if prob_foot_sum < cache_size:
                             d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1]
                         else:
                             d_vol_prob[arr_ind, level, loop_ind] = d_vol_prob[arr_ind, level, loop_ind-1]*num_iters[loop_ind]

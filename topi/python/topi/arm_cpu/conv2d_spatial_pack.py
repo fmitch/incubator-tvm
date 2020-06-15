@@ -386,6 +386,7 @@ def schedule_conv2d_spatial_pack_nchw_dv(cfg, s, data_vec, kernel_vec,
     cfg.array_dims = array_dims
     cfg.conv_dims = [ [(order.index(oh), order.index(vh)), (order.index(kh),)], 
             [(order.index(ow), order.index(vw)), (order.index(kw),)]]
+    cfg.fastest_varying = [ [order.index(ow), order.index(vw)], [order.index(co), order.index(vc)], [order.index(vc), order.index(oc)]]
 
     # schedule conv
     cfg["reorder_0"].apply(s, conv, order)

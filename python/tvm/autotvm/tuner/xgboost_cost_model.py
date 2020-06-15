@@ -378,12 +378,12 @@ def _extract_datavol_itervar_feature_index(index):
             sch, args = _extract_task.instantiate(config)
         fea = feature.get_itervar_feature_flatten(sch, args, take_log=True)
         d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-                config.array_dims, cache_sizes, config.conv_dims)
-        flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-        d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-                config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
-        flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-        return np.concatenate((fea, list(config.get_other_option().values()), flat_volume, config_features)), config.to_json_dict()
+                config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying)
+        #flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
+        #d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
+        #        config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
+        #flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
+        return np.concatenate((fea, list(config.get_other_option().values()), d_vol[2][:,:,-1].sum(axis=0), config_features)), config.to_json_dict()
     except Exception:
         return None
 
@@ -414,12 +414,12 @@ def _extract_datavol_feature_index(index):
         #with open(filename, 'w') as fi:
         #    fi.write(src)
     d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-            config.array_dims, cache_sizes, config.conv_dims)
-    flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-    d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-            config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
-    flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-    return np.concatenate((flat_volume, config_features)), config.to_json_dict()
+            config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying)
+    #flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
+    #d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
+    #        config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
+    #flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
+    return np.concatenate((d_vol[2][:,:,-1].sum(axis=0), config_features)), config.to_json_dict()
     #except Exception:
     #    return None
 
