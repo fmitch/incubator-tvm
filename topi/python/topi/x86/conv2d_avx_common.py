@@ -100,22 +100,55 @@ def _schedule_conv_NCHW_dv(s, cfg, data_vec, kernel_vec, conv_out, last):
     cfg.array_dims = [ [0,1,3,4,6,7,8,9,5], [1,2,5,6,7,10], [0,2,3,4,8,9,10] ]
     cfg.conv_dims = [ [(3,8), (6,)], [(4,9), (7,)] ]
     cfg.fastest_varying = [ [5], [10], [10]]
+
+
+    if isinstance(s[data_vec].op, tvm.te.ComputeOp) \
+            and "pad" in data_vec.op.tag:
+        batch, ic_chunk, ih, iw, ic_block = s[data_vec].op.axis
+        s[data_vec].vectorize(ic_block)
+        parallel_axis = s[data_vec].fuse(batch, ic_chunk, ih)
+        s[data_vec].parallel(parallel_axis)
+        data_vec = data_vec.op.input_tensors[0]
+
+    if isinstance(kernel_vec.op, tvm.te.ComputeOp) and \
+            kernel_vec.name == 'kernel_vec':
+        # data and kernel are not pre-computed, schedule layout transform here.
+        # this should only be used by x86 conv2d_nchw, which is for
+        # testing purpose.
+        batch, ic_chunk, ih, ic_block, iw = s[data_vec].op.axis
+        parallel_axis = s[data_vec].fuse(batch, ic_chunk, ih)
+        s[data_vec].parallel(parallel_axis)
+
+        oc_chunk, ic_chunk, oh_k, ow_k, ic_block, oc_block = s[kernel_vec].op.axis
+        s[kernel_vec].reorder(oc_chunk, oh_k, ic_chunk, ow_k, ic_block, oc_block)
+        oc_bn = cfg["tile_oc"].size[-1]
+        if oc_bn > 1:
+            s[kernel_vec].vectorize(oc_block)
+        parallel_axis = s[kernel_vec].fuse(oc_chunk, oh_k)
+        s[kernel_vec].parallel(parallel_axis)
+
+
     
     # schedule conv
     ci, vci = s[conv_out].split(ci, factor=vci_n)
-    co, vco = s[conv_out].split(co, factor=vco_n)
+    #co, vco = s[conv_out].split(co, factor=vco_n)
     oh, vh = s[conv_out].split(oh, factor=vh_n)
     ow, vw = s[conv_out].split(ow, factor=vw_n)
     order = [n, ci, co, oh, ow, vci, kh, kw, vh, vw, vco]
     cfg['reorder_0'].apply(s, conv_out, order)
 
     # schedule fusion
-    reg_n, unroll_kw = cfg["tile_ow"].size[-1], cfg["unroll_kw"].val
-    if unroll_kw:
-        s[last].unroll(kw)
+    #reg_n, unroll_kw = cfg["tile_ow"].size[-1], cfg["unroll_kw"].val
+    #if unroll_kw:
+    #    s[last].unroll(kw)
 
     # mark parallel
-    s[last].parallel(co)
+
+    s[conv_out].vectorize(vco)
+    s[conv_out].unroll(vw)
+
+    parallel_axis = s[conv_out].fuse(n, co, oh)
+    s[last].parallel(parallel_axis)
     return s
 
 

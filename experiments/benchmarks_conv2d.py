@@ -19,7 +19,21 @@ from collections import namedtuple
 #logging.getLogger('autotvm').setLevel(logging.DEBUG)
 #logging.getLogger('autotvm').addHandler(logging.StreamHandler(sys.stdout))
 
-num_threads = 32
+#num_threads = 1 85.56 0.0021 
+#num_threads = 2 85.82 0.0020
+#num_threads = 4
+#num_threads = 8
+num_threads = 12
+#num_threads = 16
+#num_threads = 24
+
+#num_threads = 1 83.63 8.20e-05
+#num_threads = 2 107.65 9.50e-05
+#num_threads = 4 88.05 8.00e-05
+#num_threads = 8 96.84 7.07e-05
+#num_threads = 12 97.72 7.09e-05
+#num_threads = 16 85.04 8.15e-05
+#num_threads = 24 85.46 8.4e-05
 os.environ["TVM_NUM_THREADS"] = str(num_threads)
 
 
@@ -28,7 +42,7 @@ tuning_option = {
     'early_stopping': None,
 
     'measure_option': autotvm.measure_option(
-        builder=autotvm.LocalBuilder(timeout=100, n_parallel=32 ),
+        builder=autotvm.LocalBuilder(timeout=100, n_parallel=16 ),
         runner=autotvm.LocalRunner(repeat=3,number=4, timeout=100),
     ),
 }
@@ -85,7 +99,7 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, ke
 
     for i in range(count): 
         log_filename = '%s_%i_%s_%s.log' % (key, i, feature_type, sys.argv[3])
-        tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank', plan_size=32)
+        tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank', plan_size=num_threads)
         tuner.tune(n_trial=trials,
                    measure_option=measure_option,
                    callbacks=[
@@ -113,11 +127,12 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, ke
             tvm.testing.assert_allclose(c_np_reshape, c_tvm.asnumpy(), rtol=1e-2)
         except:
             print('WARNING: Not equal!')
-        evaluator = func.time_evaluator(func.entry_name, ctx, repeat=3,number=4)
-        print(evaluator(c_tvm, w_tvm, a_tvm))
+        for i in range(5):
+            evaluator = func.time_evaluator(func.entry_name, ctx, repeat=3,number=4)
+            print(evaluator(c_tvm, w_tvm, a_tvm))
         os.remove(log_filename)
 
-    print(tvm.lower(s, arg_bufs, simple_mode=True))
+        print(tvm.lower(s, arg_bufs, simple_mode=True))
     if likwid_event != None:
         with open('data/likwid_%s_%s_features_%icore_%i_%s.pkl' % (key, feature_type, num_threads, trials, sys.argv[3]) , 'wb') as output:
             pickle.dump([best_config, task, tuner.cost_model.saved_features], output, pickle.HIGHEST_PROTOCOL)
@@ -174,6 +189,7 @@ def tune_and_evaluate(tuning_opt):
     N, H, W, CO, CI, KH, KW = benchmarks[key]
     strides, padding, dilation =  1, 1, 1
     trials = 1024
+    trials = 24
 
     print("N, H, W, CO, CI, KH, KW, strides, padding \n" , N, H, W, CO, CI, KH, KW, strides, padding)
     tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, key, **tuning_option)

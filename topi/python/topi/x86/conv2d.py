@@ -244,15 +244,12 @@ def conv2d_NCHW_wide(cfg, data, kernel, strides, padding, dilation, layout, out_
     kh, kw = cfg.reduce_axis(kernel_height), cfg.reduce_axis(kernel_width)
 
     ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
-    #ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
+    ##ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
     co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
     oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
     ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
 
-    if is_kernel_1x1:
-        cfg.define_knob("tile_oh", [1, 2] if oh_num > 1 else [1])
-    else:
-        cfg.define_knob("unroll_kw", [True, False])
+    #cfg.define_knob("unroll_kw", [True, False])
 
     cfg.define_reorder('reorder_0', 
             [n, ci, co, oh, ow, vci, kh, kw, vh, vw, vco],
