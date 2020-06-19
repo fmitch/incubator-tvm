@@ -82,7 +82,7 @@ def _fallback_schedule_int8(cfg, wkl):
 
 
 def _schedule_conv_NCHW_dv(s, cfg, data_vec, kernel_vec, conv_out, last):
-    n, co, oh, ow = s[conv_out].op.axis
+    n, co, oh, ow, vco = s[conv_out].op.axis
     ci, kh, kw = s[conv_out].op.reduce_axis
     vci_n = cfg['tile_ic'].size[-1]
     vco_n = cfg['tile_oc'].size[-1]
@@ -97,9 +97,9 @@ def _schedule_conv_NCHW_dv(s, cfg, data_vec, kernel_vec, conv_out, last):
     kw_n = kw.dom.extent.value
     cfg.extents = [n_n, ci_n, co_n, oh_n, ow_n, vci_n, kh_n, kw_n, vh_n, vw_n, vco_n]
     order = cfg['reorder_0'].perm #[n, ci, co, oh, ow, vci, kh, kw, vh, vw, vco]
-    cfg.array_dims = [ [0,1,3,4,5,6,7,8,9], [1,2,5,6,7,10], [0,2,3,4,5,8,9,10] ]
+    cfg.array_dims = [ [0,1,3,4,6,7,8,9,5], [1,2,5,6,7,10], [0,2,3,4,8,9,10] ]
     cfg.conv_dims = [ [(3,8), (6,)], [(4,9), (7,)] ]
-    cfg.fastest_varying = [ [4,9] [7], [4,9]]
+    cfg.fastest_varying = [ [5], [10], [10]]
     
     # schedule conv
     ci, vci = s[conv_out].split(ci, factor=vci_n)

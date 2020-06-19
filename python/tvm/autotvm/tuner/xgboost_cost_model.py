@@ -130,6 +130,8 @@ class XGBoostCostModel(CostModel):
 
         if feature_type == 'itervar':
             self.feature_extract_func = _extract_itervar_feature_index
+        elif feature_type == 'datavol_repeat':
+            self.feature_extract_func = _extract_datavol_repeat_feature_index
         elif feature_type == 'datavol':
             self.feature_extract_func = _extract_datavol_feature_index
         elif feature_type == 'datavol_itervar':
@@ -400,19 +402,30 @@ def _extract_datavol_feature_index(index):
     with _extract_target:
         # Get schedule and args, which initializes config to contain schedule info.
         sch, args = _extract_task.instantiate(config)
-        #func = tvm.build(sch, args, target='c')
-        #src = func.get_source()
-        #filename = "conv_src/src"
-        #for dim in _extract_task.args[0][1]:
-        #    filename += str(dim) + '_'
-        #for dim in _extract_task.args[1][1]:
-        #    filename += str(dim) + '_'
-        #for dim in config.get_flatten_feature():
-        #    if dim != -1:
-        #        filename += str(int(dim)) + '_'
-        #filename += '.c'
-        #with open(filename, 'w') as fi:
-        #    fi.write(src)
+    d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
+            config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying)
+    #flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
+    #d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
+    #        config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
+    #flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
+    return np.concatenate((d_vol[2][:,:,-1].sum(axis=0), config_features)), config.to_json_dict()
+    #except Exception:
+    #    return None
+
+def _extract_datavol_repeat_feature_index(index):
+    #try:
+    config = _extract_space.get(index)
+    config_features = []
+    for param in config.to_json_dict()['entity']:
+        if param[1] == 'sp':
+            config_features += param[-1][1:]
+        elif param[1] == 'an':
+            for setting in param[-1]:
+                config_features += [int(setting != 'none')]
+    with _extract_target:
+        # Get schedule and args, which initializes config to contain schedule info.
+        sch, args = _extract_task.instantiate(config)
+    config.extents[0] *= 16
     d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
             config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying)
     #flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))

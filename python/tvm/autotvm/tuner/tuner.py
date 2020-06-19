@@ -116,7 +116,7 @@ class Tuner(object):
         """
 
 
-    def tune(self, n_trial, measure_option, early_stopping=None, callbacks=(), si_prefix='G', likwid_event=None):
+    def tune(self, n_trial, measure_option, early_stopping=None, callbacks=(), si_prefix='G', likwid_event=None, save_features=False):
         """Begin tuning
 
         Parameters
@@ -156,9 +156,9 @@ class Tuner(object):
         padding = self.task.args[3]
 
         ctx=tvm.context(self.task.target.__str__(), 0)
-        a_tvm = tvm.nd.array(np.random.uniform(size=(N,CI,H,W) ).astype(np.float32), ctx)
-        w_tvm = tvm.nd.array(np.random.uniform(size=(CO,CI,KH,KW) ).astype(np.float32), ctx)
-        c_tvm = tvm.nd.array(np.zeros((N,CO,H+KH-2*padding-1,W+KW-2*padding-1), dtype=np.float32), ctx)
+        #a_tvm = tvm.nd.array(np.random.uniform(size=(N,CI,H,W) ).astype(np.float32), ctx)
+        #w_tvm = tvm.nd.array(np.random.uniform(size=(CO,CI,KH,KW) ).astype(np.float32), ctx)
+        #c_tvm = tvm.nd.array(np.zeros((N,CO,H+KH-2*padding-1,W+KW-2*padding-1), dtype=np.float32), ctx)
         import time
 
         while i < n_trial:
@@ -205,16 +205,21 @@ class Tuner(object):
                 group = pylikwid.addeventset(likwid_event)
                 err = pylikwid.setup(group)
 
-            for k, (inp, res) in enumerate(zip(inputs, results)):
-                with inp.target:
-                    sch, args = self.task.instantiate(inp.config)
-                    #with tvm.ir.transform.PassContext():
-                    func = tvm.build(sch, args, target_host=inp.task.target_host)
-                    evaluator = func.time_evaluator(func.entry_name, ctx=ctx, number=10)
-                    #print('Time Evaluator Results', evaluator(c_tvm, w_tvm, a_tvm).results)
+                for k, (inp, res) in enumerate(zip(inputs, results)):
+                    with inp.target:
+                        sch, args = self.task.instantiate(inp.config)
+                        #with tvm.ir.transform.PassContext():
+                        func = tvm.build(sch, args, target_host=inp.task.target_host)
+                        evaluator = func.time_evaluator(func.entry_name, ctx=ctx, repeat=3, number=4)
+                        #print('Time Evaluator Results', evaluator(c_tvm, w_tvm, a_tvm).results)
 
-                #LIKWID PERFCTR
-                if likwid_event != None:
+                    dshape = (N,CI//inp.config['tile_ic'].size[-1],H,W,inp.config['tile_ic'].size[-1])
+                    kshape = (CO//inp.config['tile_oc'].size[-1],CI//inp.config['tile_ic'].size[-1],KH,KW,inp.config['tile_ic'].size[-1],inp.config['tile_oc'].size[-1])
+                    oshape = (N,CO//inp.config['tile_oc'].size[-1],H+KH-2*padding-1,W+KW-2*padding-1, inp.config['tile_oc'].size[-1])
+                    a_tvm = tvm.nd.array(np.random.uniform(size=dshape).astype(np.float32), ctx)
+                    w_tvm = tvm.nd.array(np.random.uniform(size=kshape).astype(np.float32), ctx)
+                    c_tvm = tvm.nd.array(np.zeros(oshape, dtype=np.float32), ctx)
+                    #LIKWID PERFCTR
                     err = pylikwid.start()
                     evaluator(c_tvm, w_tvm, a_tvm)
                     err = pylikwid.stop()
@@ -234,13 +239,13 @@ class Tuner(object):
                         self.cost_model.saved_features[inp.config.index].set_counters(likwid_results)
                     else:
                         self.cost_model.saved_features[inp.config.index] = SavedFeature(result=res, counters=likwid_results)
-                else:
+                pylikwid.finalize()
+            elif save_features == True:
+                for k, (inp, res) in enumerate(zip(inputs, results)):
                     if inp.config.index in self.cost_model.saved_features.keys():
                         self.cost_model.saved_features[inp.config.index].set_result(res)
                     else:
                         self.cost_model.saved_features[inp.config.index] = SavedFeature(result=res)
-            if likwid_event != None:
-                pylikwid.finalize()
 
             for callback in callbacks:
                 callback(self, inputs, results)
