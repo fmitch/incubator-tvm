@@ -171,10 +171,10 @@ def conv2d_NCHW_small(cfg, data, kernel, strides, padding, dilation, layout, out
     oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 1, policy="verbose")
     ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
 
-    if is_kernel_1x1:
-        cfg.define_knob("tile_oh", [1, 2] if oh > 1 else [1])
-    else:
-        cfg.define_knob("unroll_kw", [True, False])
+    #if is_kernel_1x1:
+    #    cfg.define_knob("tile_oh", [1, 2] if oh > 1 else [1])
+    #else:
+    #    cfg.define_knob("unroll_kw", [True, False])
 
     cfg.define_reorder('reorder_0', 
             [n, ci, co, oh, ow, vci, kh, kw, vh, vw, vco],

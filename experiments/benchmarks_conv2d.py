@@ -23,7 +23,7 @@ from collections import namedtuple
 #num_threads = 2 85.82 0.0020
 #num_threads = 4
 #num_threads = 8
-num_threads = 12
+num_threads = 8
 #num_threads = 16
 #num_threads = 24
 
@@ -42,7 +42,7 @@ tuning_option = {
     'early_stopping': None,
 
     'measure_option': autotvm.measure_option(
-        builder=autotvm.LocalBuilder(timeout=100, n_parallel=16 ),
+        builder=autotvm.LocalBuilder(timeout=100, n_parallel=8 ),
         runner=autotvm.LocalRunner(repeat=3,number=4, timeout=100),
     ),
 }
@@ -99,7 +99,7 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, ke
 
     for i in range(count): 
         log_filename = '%s_%i_%s_%s.log' % (key, i, feature_type, sys.argv[3])
-        tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank', plan_size=num_threads)
+        tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank', plan_size=8)
         tuner.tune(n_trial=trials,
                    measure_option=measure_option,
                    callbacks=[
@@ -121,7 +121,10 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, ke
         a_tvm = tvm.nd.array(a_np, ctx=ctx)
         w_tvm = tvm.nd.array(w_np, ctx=ctx)
         c_tvm = tvm.nd.array(np.zeros(c_np_reshape.shape, dtype=np.float32), ctx=ctx)
-        func(c_tvm, w_tvm, a_tvm)
+        if arg_bufs[1].shape == w_tvm.shape:
+            func(c_tvm, w_tvm, a_tvm)
+        else:
+            func(c_tvm, a_tvm, w_tvm)
 
         try:
             tvm.testing.assert_allclose(c_np_reshape, c_tvm.asnumpy(), rtol=1e-2)
@@ -129,7 +132,10 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, ke
             print('WARNING: Not equal!')
         for i in range(5):
             evaluator = func.time_evaluator(func.entry_name, ctx, repeat=3,number=4)
-            print(evaluator(c_tvm, w_tvm, a_tvm))
+            if arg_bufs[1].shape == w_tvm.shape:
+                print(evaluator(c_tvm, w_tvm, a_tvm))
+            else:
+                print(evaluator(c_tvm, a_tvm, w_tvm))
         os.remove(log_filename)
 
         print(tvm.lower(s, arg_bufs, simple_mode=True))
@@ -188,8 +194,9 @@ def tune_and_evaluate(tuning_opt):
 
     N, H, W, CO, CI, KH, KW = benchmarks[key]
     strides, padding, dilation =  1, 1, 1
+    if KH == 1:
+        padding = 0
     trials = 1024
-    trials = 24
 
     print("N, H, W, CO, CI, KH, KW, strides, padding \n" , N, H, W, CO, CI, KH, KW, strides, padding)
     tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, key, **tuning_option)
