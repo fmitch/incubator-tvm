@@ -88,7 +88,8 @@ def _schedule_conv_NCHW_dv(s, cfg, data_vec, kernel_vec, conv_out, last):
     vco_n = cfg['tile_oc'].size[-1]
     vh_n = cfg['tile_oh'].size[-1]
     vw_n = cfg['tile_ow'].size[-1]
-    co_n = co.dom.extent.value // vco_n
+    assert( vco_n == vco.dom.extent.value)
+    co_n = co.dom.extent.value 
     oh_n = oh.dom.extent.value // vh_n
     ow_n = ow.dom.extent.value // vw_n
     ci_n = ci.dom.extent.value // vci_n

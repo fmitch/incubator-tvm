@@ -91,3 +91,4 @@ class XGBTuner(ModelBasedTuner):
 
         # manually close pool to avoid multiprocessing issues
         self.cost_model._close_pool()
+

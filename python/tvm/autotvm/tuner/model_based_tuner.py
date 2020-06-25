@@ -221,6 +221,25 @@ class ModelBasedTuner(Tuner):
         self.flops_max = 0.0
         self.train_ct = 0
 
+    def random_next_batch(self, batch_size):
+        ret = []
+
+        counter = 0
+        while counter < batch_size:
+            if len(self.visited) >= len(self.space):
+                break
+
+            index = np.random.randint(len(self.space))
+            while index in self.visited:
+                index = np.random.randint(len(self.space))
+
+            ret.append(self.space.get(index))
+            self.visited.add(index)
+
+            counter += 1
+        return ret
+
+
     def next_batch(self, batch_size):
         ret = []
 

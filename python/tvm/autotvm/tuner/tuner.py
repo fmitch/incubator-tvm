@@ -33,9 +33,9 @@ import tvm
 import pylikwid
 
 cache_sizes = [
-        int(subprocess.run(['getconf', 'LEVEL1_DCACHE_SIZE'], stdout=subprocess.PIPE).stdout)//64,
-        int(subprocess.run(['getconf', 'LEVEL2_CACHE_SIZE'], stdout=subprocess.PIPE).stdout)//64,
-        int(subprocess.run(['getconf', 'LEVEL3_CACHE_SIZE'], stdout=subprocess.PIPE).stdout)//64]
+        int(subprocess.run(['getconf', 'LEVEL1_DCACHE_SIZE'], stdout=subprocess.PIPE).stdout),
+        int(subprocess.run(['getconf', 'LEVEL2_CACHE_SIZE'], stdout=subprocess.PIPE).stdout),
+        int(subprocess.run(['getconf', 'LEVEL3_CACHE_SIZE'], stdout=subprocess.PIPE).stdout)]
 
 class SavedFeature:
     def __init__(self, config=None, feature=None, result=None, counters=None):
@@ -159,13 +159,13 @@ class Tuner(object):
         #a_tvm = tvm.nd.array(np.random.uniform(size=(N,CI,H,W) ).astype(np.float32), ctx)
         #w_tvm = tvm.nd.array(np.random.uniform(size=(CO,CI,KH,KW) ).astype(np.float32), ctx)
         #c_tvm = tvm.nd.array(np.zeros((N,CO,H+KH-2*padding-1,W+KW-2*padding-1), dtype=np.float32), ctx)
-        import time
 
         while i < n_trial:
             if not self.has_next():
                 break
 
-            configs = self.next_batch(min(n_parallel, n_trial - i))
+            #configs = self.next_batch(min(n_parallel, n_trial - i))
+            configs = self.random_next_batch(min(n_parallel, n_trial - i))
 
             inputs = [MeasureInput(self.task.target, self.task, config) for config in configs]
             results = measure_batch(inputs)
@@ -210,8 +210,7 @@ class Tuner(object):
                         sch, args = self.task.instantiate(inp.config)
                         #with tvm.ir.transform.PassContext():
                         func = tvm.build(sch, args, target_host=inp.task.target_host)
-                        evaluator = func.time_evaluator(func.entry_name, ctx=ctx, repeat=3, number=4)
-                        #print('Time Evaluator Results', evaluator(c_tvm, w_tvm, a_tvm).results)
+                        evaluator = func.time_evaluator(func.entry_name, ctx, repeat=3, number=4)
 
                     dshape = (N,CI//inp.config['tile_ic'].size[-1],H,W,inp.config['tile_ic'].size[-1])
                     kshape = (CO//inp.config['tile_oc'].size[-1],CI//inp.config['tile_ic'].size[-1],KH,KW,inp.config['tile_ic'].size[-1],inp.config['tile_oc'].size[-1])
@@ -219,10 +218,24 @@ class Tuner(object):
                     a_tvm = tvm.nd.array(np.random.uniform(size=dshape).astype(np.float32), ctx)
                     w_tvm = tvm.nd.array(np.random.uniform(size=kshape).astype(np.float32), ctx)
                     c_tvm = tvm.nd.array(np.zeros(oshape, dtype=np.float32), ctx)
+                    ##Warm up ### I tried this warm up and running the function once, 
+                    #             likwid results were very bad, resulted in barely better than
+                    #             random when training RandForest model on post-tuning data
+                    #if tuple(args[1].shape) == w_tvm.shape:
+                    #    for _ in range(10):
+                    #        func(c_tvm, w_tvm, a_tvm)
+                    #else:
+                    #    for _ in range(10):
+                    #        func(c_tvm, a_tvm, w_tvm)
+
                     #LIKWID PERFCTR
                     err = pylikwid.start()
-                    evaluator(c_tvm, w_tvm, a_tvm)
+                    if tuple(args[1].shape) == w_tvm.shape:
+                        evaluator(c_tvm, w_tvm, a_tvm)
+                    else:
+                        evaluator(c_tvm, a_tvm, w_tvm)
                     err = pylikwid.stop()
+
                     likwid_results = []
                     for thread in range(0,len(cpus)):
                         likwid_results.append({})

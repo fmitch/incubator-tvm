@@ -19,7 +19,7 @@ from collections import namedtuple
 #logging.getLogger('autotvm').setLevel(logging.DEBUG)
 #logging.getLogger('autotvm').addHandler(logging.StreamHandler(sys.stdout))
 
-num_threads = 32
+num_threads = 1
 os.environ["TVM_NUM_THREADS"] = str(num_threads)
 
 
@@ -81,10 +81,10 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, ke
     ctx = tvm.cpu()
     a_np = np.random.uniform(size=(N, CI, H, W)).astype(np.float32)
     w_np = np.random.uniform(size=(CO, CI, KH, KW)).astype(np.float32)
-    c_np = conv2d_nchw_python(a_np, w_np, strides, padding)
+    c_np = conv2d_nchw_python(a_np, w_np, strides, padding).astype(np.float32)
 
     for i in range(count): 
-        log_filename = '%s_%i_%s_%s.log' % (key, i, feature_type, sys.argv[3])
+        log_filename = '%s_%i_%s_%s_%icore_rand.log' % (key, i, feature_type, sys.argv[3],num_threads)
         tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank', plan_size=32)
         tuner.tune(n_trial=trials,
                    measure_option=measure_option,
@@ -103,23 +103,31 @@ def tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, ke
                 func = tvm.build(s, arg_bufs)
         
         if using_NCHWc:
+            a_np_reshape = a_np.reshape((N, CI//best_config['tile_ic'].size[-1], best_config['tile_ic'].size[-1], H, W)).transpose((0,1,3,4,2))
+            w_np_reshape = w_np.reshape((CO//best_config['tile_oc'].size[-1], best_config['tile_oc'].size[-1], CI//best_config['tile_ic'].size[-1], best_config['tile_ic'].size[-1], KH, KW)).transpose((0,2,4,5,3,1))
             c_np_reshape = c_np.reshape((N, CO//best_config['tile_oc'].size[-1], best_config['tile_oc'].size[-1], H, W)).transpose((0,1,3,4,2))
-        a_tvm = tvm.nd.array(a_np, ctx=ctx)
-        w_tvm = tvm.nd.array(w_np, ctx=ctx)
-        c_tvm = tvm.nd.array(np.zeros(c_np_reshape.shape, dtype=np.float32), ctx=ctx)
-        func(c_tvm, w_tvm, a_tvm)
+        a_tvm = tvm.nd.array(a_np_reshape, ctx=ctx)
+        w_tvm = tvm.nd.array(w_np_reshape, ctx=ctx)
+        c_tvm = tvm.nd.array(c_np_reshape, ctx=ctx)
+        if tuple(arg_bufs[1].shape) == w_tvm.shape:
+            func(c_tvm, w_tvm, a_tvm)
+        else:
+            func(c_tvm, a_tvm, w_tvm)
 
         try:
             tvm.testing.assert_allclose(c_np_reshape, c_tvm.asnumpy(), rtol=1e-2)
         except:
             print('WARNING: Not equal!')
         evaluator = func.time_evaluator(func.entry_name, ctx, repeat=3,number=4)
-        print(evaluator(c_tvm, w_tvm, a_tvm))
+        if tuple(arg_bufs[1].shape) == w_tvm.shape:
+            print(evaluator(c_tvm, w_tvm, a_tvm))
+        else:
+            print(evaluator(c_tvm, a_tvm, w_tvm))
         os.remove(log_filename)
 
     print(tvm.lower(s, arg_bufs, simple_mode=True))
     if likwid_event != None:
-        with open('data/likwid_%s_%s_features_%icore_%i_%s.pkl' % (key, feature_type, num_threads, trials, sys.argv[3]) , 'wb') as output:
+        with open('data/likwid_rand_%s_%s_features_%icore_%i_%s.pkl' % (key, feature_type, num_threads, trials, sys.argv[3]) , 'wb') as output:
             pickle.dump([best_config, task, tuner.cost_model.saved_features], output, pickle.HIGHEST_PROTOCOL)
     else:
         with open('data/%s_%s_features_%icore_%i_%s.pkl' % (key, feature_type, num_threads, trials, sys.argv[3]) , 'wb') as output:
@@ -173,7 +181,9 @@ def tune_and_evaluate(tuning_opt):
 
     N, H, W, CO, CI, KH, KW = benchmarks[key]
     strides, padding, dilation =  1, 1, 1
-    trials = 1024
+    if KH == 1:
+        padding = 0
+    trials = 128
 
     print("N, H, W, CO, CI, KH, KW, strides, padding \n" , N, H, W, CO, CI, KH, KW, strides, padding)
     tune_kernels(N, H, W, CO, CI, KH, KW, strides, padding, dilation, trials, key, **tuning_option)

@@ -192,7 +192,7 @@ def conv2d_NCHW_small(cfg, data, kernel, strides, padding, dilation, layout, out
     # Pack data if raw 4-D data is provided.
     # This can only happen when autotuning.
     if len(data.shape) == 4:
-        if autotvm.GLOBAL_SCOPE.in_tuning:
+        #if autotvm.GLOBAL_SCOPE.in_tuning:
             # Directly use modified data layout placeholder.
             dshape = (n_num, in_channel // cfg["tile_ic"].size[-1],
                       ih, iw, cfg["tile_ic"].size[-1])
@@ -203,8 +203,8 @@ def conv2d_NCHW_small(cfg, data, kernel, strides, padding, dilation, layout, out
                       cfg["tile_ic"].size[-1],
                       cfg["tile_oc"].size[-1])
             kernel = tvm.te.placeholder(kshape, kernel.dtype, name="kernel")
-        else:
-            data, kernel = _pack_data(cfg, data, kernel)
+        #else:
+        #    data, kernel = _pack_data(cfg, data, kernel)
 
     #return nn.conv2d_nchw(data,
     #                       kernel,
@@ -290,19 +290,19 @@ def conv2d_NCHW_wide(cfg, data, kernel, strides, padding, dilation, layout, out_
     # Pack data if raw 4-D data is provided.
     # This can only happen when autotuning.
     if len(data.shape) == 4:
-        if autotvm.GLOBAL_SCOPE.in_tuning:
+        #if autotvm.GLOBAL_SCOPE.in_tuning:
             # Directly use modified data layout placeholder.
-            dshape = (n_num, in_channel // cfg["tile_ic"].size[-1],
-                      ih, iw, cfg["tile_ic"].size[-1])
-            data = tvm.te.placeholder(dshape, data.dtype, name="data")
-            kshape = (num_filter // cfg["tile_oc"].size[-1],
-                      in_channel // cfg["tile_ic"].size[-1],
-                      kernel_height, kernel_width,
-                      cfg["tile_ic"].size[-1],
-                      cfg["tile_oc"].size[-1])
-            kernel = tvm.te.placeholder(kshape, kernel.dtype, name="kernel")
-        else:
-            data, kernel = _pack_data(cfg, data, kernel)
+        dshape = (n_num, in_channel // cfg["tile_ic"].size[-1],
+                  ih, iw, cfg["tile_ic"].size[-1])
+        data = tvm.te.placeholder(dshape, data.dtype, name="data")
+        kshape = (num_filter // cfg["tile_oc"].size[-1],
+                  in_channel // cfg["tile_ic"].size[-1],
+                  kernel_height, kernel_width,
+                  cfg["tile_ic"].size[-1],
+                  cfg["tile_oc"].size[-1])
+        kernel = tvm.te.placeholder(kshape, kernel.dtype, name="kernel")
+        #else:
+        #    data, kernel = _pack_data(cfg, data, kernel)
 
     #return nn.conv2d_nchw(data,
     #                       kernel,
