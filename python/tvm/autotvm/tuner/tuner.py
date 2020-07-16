@@ -116,7 +116,7 @@ class Tuner(object):
         """
 
 
-    def tune(self, n_trial, measure_option, early_stopping=None, callbacks=(), si_prefix='G', likwid_event=None, save_features=False):
+    def tune(self, n_trial, measure_option, early_stopping=None, callbacks=(), si_prefix='G', likwid_event=None, save_features=False, random=False):
         """Begin tuning
 
         Parameters
@@ -150,10 +150,11 @@ class Tuner(object):
         GLOBAL_SCOPE.in_tuning = True
         i = error_ct = 0
 
-        # Get arrays for conv
-        N, CI, H, W = self.task.args[0][1]
-        CO, _, KH, KW = self.task.args[1][1]
-        padding = self.task.args[3]
+        if likwid_event != None:
+            # Get arrays for conv
+            N, CI, H, W = self.task.args[0][1]
+            CO, _, KH, KW = self.task.args[1][1]
+            padding = self.task.args[3]
 
         ctx=tvm.context(self.task.target.__str__(), 0)
         #a_tvm = tvm.nd.array(np.random.uniform(size=(N,CI,H,W) ).astype(np.float32), ctx)
@@ -164,8 +165,10 @@ class Tuner(object):
             if not self.has_next():
                 break
 
-            #configs = self.next_batch(min(n_parallel, n_trial - i))
-            configs = self.random_next_batch(min(n_parallel, n_trial - i))
+            if random:
+                configs = self.random_next_batch(min(n_parallel, n_trial - i))
+            else:
+                configs = self.next_batch(min(n_parallel, n_trial - i))
 
             inputs = [MeasureInput(self.task.target, self.task, config) for config in configs]
             results = measure_batch(inputs)
@@ -193,7 +196,10 @@ class Tuner(object):
             i += len(results)
             self.ttl = min(early_stopping + self.best_iter, n_trial) - i
 
-            self.update(inputs, results)
+            if random:
+                self.update_random(inputs, results)
+            else:
+                self.update(inputs, results)
 
             if likwid_event != None:
                 pylikwid.inittopology()

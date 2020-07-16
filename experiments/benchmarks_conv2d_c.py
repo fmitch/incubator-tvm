@@ -62,7 +62,7 @@ def tune_kernels(args, N, H, W, CO, CI, KH, KW, strides, padding, dilation, tria
 
     task = autotvm.task.create(func_create,
                                args=(data, kernel, strides, padding, 1, origin_layout, origin_layout, 'float32'),
-                               target='llvm -mcpu=core-avx2')
+                               target='c')
     if 'NCHWc' in func_create:
         using_NCHWc = True
     else:
@@ -77,9 +77,9 @@ def tune_kernels(args, N, H, W, CO, CI, KH, KW, strides, padding, dilation, tria
 
     for i in range(count): 
         if random:
-            log_filename = '%s_%i_%s_%s_%icore_rand.log' % (key, i, feature_type, args.search_size,num_threads)
+            log_filename = '%s_%i_%s_%s_%icore_rand_gcc.log' % (key, i, feature_type, args.search_size,num_threads)
         else:
-            log_filename = '%s_%i_%s_%s_%icore.log' % (key, i, feature_type, args.search_size ,num_threads)
+            log_filename = '%s_%i_%s_%s_%icore_gcc.log' % (key, i, feature_type, args.search_size ,num_threads)
 
         if args.key_id != None and count == 1:
             save_ind = int(args.key_id)
@@ -87,14 +87,14 @@ def tune_kernels(args, N, H, W, CO, CI, KH, KW, strides, padding, dilation, tria
             save_ind = i
         if likwid_event != None:
             if random:
-                pickle_file = '/media/frost/DATA/tvm_data/fix_likwid_rand_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, feature_type, num_threads, trials, args.search_size, save_ind)
+                pickle_file = '/media/frost/DATA/tvm_data/fix_gcc_likwid_rand_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, feature_type, num_threads, trials, args.search_size, save_ind)
             else:
-                pickle_file = '/media/frost/DATA/tvm_data/fix_likwid_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, feature_type, num_threads, trials, args.search_size, save_ind)
+                pickle_file = '/media/frost/DATA/tvm_data/fix_gcc_likwid_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, feature_type, num_threads, trials, args.search_size, save_ind)
         else:
             if random:
-                pickle_file = '/media/frost/DATA/tvm_data/fix_rand_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, feature_type, num_threads, trials, args.search_size, save_ind)
+                pickle_file = '/media/frost/DATA/tvm_data/fix_gcc_rand_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, feature_type, num_threads, trials, args.search_size, save_ind)
             else:
-                pickle_file = '/media/frost/DATA/tvm_data/fix_sa_%i_%s_%s_features_%icore_%i_%s_%i.pkl' % (sa_n_iter, key, feature_type, num_threads, trials, args.search_size, save_ind)
+                pickle_file = '/media/frost/DATA/tvm_data/fix_gcc_sa_%i_%s_%s_features_%icore_%i_%s_%i.pkl' % (sa_n_iter, key, feature_type, num_threads, trials, args.search_size, save_ind)
         if os.path.exists(pickle_file):
             print('File exists', pickle_file)
             continue
@@ -113,7 +113,7 @@ def tune_kernels(args, N, H, W, CO, CI, KH, KW, strides, padding, dilation, tria
 
         # apply history best from log file
         with autotvm.apply_history_best(log_filename):
-            with tvm.target.create("llvm -mcpu=core-avx2"):
+            with tvm.target.create("c"):
                 s, arg_bufs = task.func(*task.args)
                 func = tvm.build(s, arg_bufs)
         
@@ -201,7 +201,7 @@ def tune_and_evaluate():
         'early_stopping': None,
 
         'measure_option': autotvm.measure_option(
-            builder=autotvm.LocalBuilder(timeout=10, n_parallel=16 ),
+            builder=autotvm.LocalBuilder(timeout=10, n_parallel=16, build_func='g++'),
             runner=autotvm.LocalRunner(repeat=3,number=4, timeout=10),
         ),
     }

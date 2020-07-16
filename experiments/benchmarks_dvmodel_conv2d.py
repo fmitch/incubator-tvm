@@ -10,7 +10,7 @@ import topi
 from topi.testing import conv2d_nchw_python
 from tvm import te
 from tvm import autotvm
-from tvm.autotvm.tuner import XGBTuner, GATuner, RandomTuner, GridSearchTuner
+from tvm.autotvm.tuner import DataVolumeTuner, GATuner, RandomTuner, GridSearchTuner
 import tvm.contrib.graph_runtime as runtime
 #from tvm.autotvm.task.topi_integration import deserialize_args
 from collections import namedtuple
@@ -34,8 +34,8 @@ def tune_kernels(args, N, H, W, CO, CI, KH, KW, strides, padding, dilation, tria
 
     origin_layout = 'NCHW'
 
-    feature_type = args.feature
-    print('Feature:',feature_type)
+    prediction_type = args.prediction
+    print('Feature:', prediction_type)
 
     if 'small' == args.search_size:
         func_create = 'conv2d_NCHWc_small.x86'
@@ -77,9 +77,10 @@ def tune_kernels(args, N, H, W, CO, CI, KH, KW, strides, padding, dilation, tria
 
     for i in range(count): 
         if random:
-            log_filename = '%s_%i_%s_%s_%icore_rand.log' % (key, i, feature_type, args.search_size,num_threads)
+            log_filename = '%s_%i_%s_%s_%icore_rand.log' % (key, i, prediction_type, args.search_size,num_threads)
         else:
-            log_filename = '%s_%i_%s_%s_%icore.log' % (key, i, feature_type, args.search_size ,num_threads)
+            log_filename = '%s_%i_%s_%s_%icore.log' % (key, i, prediction_type, args.search_size ,num_threads)
+
 
         if args.key_id != None and count == 1:
             save_ind = int(args.key_id)
@@ -87,19 +88,22 @@ def tune_kernels(args, N, H, W, CO, CI, KH, KW, strides, padding, dilation, tria
             save_ind = i
         if likwid_event != None:
             if random:
-                pickle_file = '/media/frost/DATA/tvm_data/fix_likwid_rand_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, feature_type, num_threads, trials, args.search_size, save_ind)
+                pickle_file = '/media/frost/DATA/tvm_data/fix_likwid_rand_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, prediction_type, num_threads, trials, args.search_size, save_ind)
             else:
-                pickle_file = '/media/frost/DATA/tvm_data/fix_likwid_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, feature_type, num_threads, trials, args.search_size, save_ind)
+                pickle_file = '/media/frost/DATA/tvm_data/fix_likwid_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, prediction_type, num_threads, trials, args.search_size, save_ind)
         else:
             if random:
-                pickle_file = '/media/frost/DATA/tvm_data/fix_rand_%s_%s_features_%icore_%i_%s_%i.pkl' % (key, feature_type, num_threads, trials, args.search_size, save_ind)
+                pickle_file = '/media/frost/DATA/tvm_data/fix_rand_%s_new_%s_features_%icore_%i_%s_%i.pkl' % (key, prediction_type, num_threads, trials, args.search_size, save_ind)
             else:
-                pickle_file = '/media/frost/DATA/tvm_data/fix_sa_%i_%s_%s_features_%icore_%i_%s_%i.pkl' % (sa_n_iter, key, feature_type, num_threads, trials, args.search_size, save_ind)
+                pickle_file = '/media/frost/DATA/tvm_data/fix2_sa_%i_%s_new_%s_features_%icore_%i_%s_%i.pkl' % (sa_n_iter, key, prediction_type, num_threads, trials, args.search_size, save_ind)
+
         if os.path.exists(pickle_file):
             print('File exists', pickle_file)
             continue
 
-        tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank', plan_size=32, sa_n_iter=sa_n_iter)
+
+
+        tuner = autotvm.tuner.DataVolumeTuner(task, prediction_type=prediction_type, plan_size=32, sa_n_iter=sa_n_iter)
         tuner.tune(n_trial=trials,
                    measure_option=measure_option,
                    callbacks=[
@@ -176,13 +180,13 @@ def tune_and_evaluate():
 
     parser = argparse.ArgumentParser(description='Run conv2d benchmarks in TVM')
     parser.add_argument( '-b','--benchmark', help="Which benchmark to use, int from 0-19", default=0, type=int)
-    parser.add_argument( '-f','--feature', help="Type of feature to use, one of 'datavol', 'itervar', 'datavol_itervar', 'itervar_silent_dv'", default='itervar', type=str)
+    parser.add_argument( '-p','--prediction', help="Type of prediction to use, one of 'sum', 'sumL2L3', 'time'", default='sumL2L3', type=str)
     parser.add_argument( '-s','--search_size', help="Type of search space to use, one of 'small', 'mid', 'wide'", default='small', type=str)
     parser.add_argument( '-n','--num_iters', help="Int. number of times to run training", default=1, type=int)
     parser.add_argument( '-t','--trials', help="Int. Number of trials to sample", default=600, type=int)
     parser.add_argument( '-l','--likwid_event', help='Likwid event to capture during training', default=None)
-    parser.add_argument( '-r','--random', help="Use XGB+SA to select samples, or randomly select", default=False, action='store_true')
-    parser.add_argument( '-k','--key_id', help="Key ID for RPC server.", default=None, type=str)
+    parser.add_argument( '-r','--random', help="Use Model+SA to select samples, or randomly select", default=False, action='store_true')
+    parser.add_argument( '-k','--key_id', help="Key ID for RPC runner", default=None, type=str)
     parser.add_argument('--sa_num_iters', help="Number of iterations of simulated annealing", default=500, type=int)
     parser.add_argument('--no_save_features', help="Should save features", default=False, action='store_true')
 
@@ -203,6 +207,7 @@ def tune_and_evaluate():
         'measure_option': autotvm.measure_option(
             builder=autotvm.LocalBuilder(timeout=10, n_parallel=16 ),
             runner=autotvm.LocalRunner(repeat=3,number=4, timeout=10),
+            #runner=autotvm.RPCRunner('abc', '0.0.0.0', 9000, 0, 100, repeat=3,number=4, n_parallel=10),
         ),
     }
 

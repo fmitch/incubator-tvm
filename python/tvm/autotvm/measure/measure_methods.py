@@ -38,7 +38,7 @@ import tvm.ir.transform
 from tvm import nd, rpc as _rpc, target as _target
 from tvm.error import TVMError
 from tvm.driver import build
-from tvm.contrib import nvcc, ndk, tar
+from tvm.contrib import nvcc, ndk, tar,  cc
 
 from ..util import get_const_tuple
 from ..env import AutotvmGlobalScope
@@ -87,6 +87,8 @@ class LocalBuilder(Builder):
                 build_func = tar.tar
             elif build_func == 'ndk':
                 build_func = ndk.create_shared
+            elif build_func == 'g++':
+                build_func = cc.create_shared
             else:
                 raise ValueError("Invalid build_func" + build_func)
         self.build_func = _wrap_build_func(build_func)

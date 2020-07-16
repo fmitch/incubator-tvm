@@ -17,10 +17,10 @@
 """Tuner that uses xgboost as cost model"""
 
 from .model_based_tuner import ModelBasedTuner, ModelOptimizer
-from .xgboost_cost_model import XGBoostCostModel
+from .dv_cost_model import DataVolumeCostModel
 from .sa_model_optimizer import SimulatedAnnealingOptimizer
 
-class XGBTuner(ModelBasedTuner):
+class DataVolumeTuner(ModelBasedTuner):
     """Tuner that uses xgboost as cost model
 
     Parameters
@@ -69,13 +69,12 @@ class XGBTuner(ModelBasedTuner):
         Otherwise, output debug information every `verbose` iterations.
     """
     def __init__(self, task, plan_size=64,
-                 feature_type='itervar', loss_type='rank', num_threads=None,
+                 prediction_type='sumL2L3', num_threads=None,
                  optimizer='sa', diversity_filter_ratio=None, log_interval=50, sa_n_iter=500):
-        cost_model = XGBoostCostModel(task,
-                                      feature_type=feature_type,
-                                      loss_type=loss_type,
-                                      num_threads=num_threads,
-                                      log_interval=log_interval // 2)
+        cost_model = DataVolumeCostModel(task,
+                                      feature_type='datavol',
+                                      prediction_type=prediction_type,
+                                      num_threads=num_threads)
         if optimizer == 'sa':
             optimizer = SimulatedAnnealingOptimizer(task, log_interval=log_interval, n_iter=sa_n_iter)
         else:
@@ -83,11 +82,11 @@ class XGBTuner(ModelBasedTuner):
                                                           "a supported name string" \
                                                           "or a ModelOptimizer object."
 
-        super(XGBTuner, self).__init__(task, cost_model, optimizer,
+        super(DataVolumeTuner, self).__init__(task, cost_model, optimizer,
                                        plan_size, diversity_filter_ratio)
 
     def tune(self, *args, **kwargs):  # pylint: disable=arguments-differ
-        super(XGBTuner, self).tune(*args, **kwargs)
+        super(DataVolumeTuner, self).tune(*args, **kwargs)
 
         # manually close pool to avoid multiprocessing issues
         self.cost_model._close_pool()

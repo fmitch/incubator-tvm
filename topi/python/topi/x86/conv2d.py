@@ -30,6 +30,7 @@ from ..nn.depthwise_conv2d import _get_workload as _get_depthwise_conv2d_workloa
 from ..nn.util import get_pad_tuple
 from ..util import get_const_tuple, traverse_inline
 from . import conv2d_avx_1x1, conv2d_avx_common
+from itertools import permutations
 
 logger = logging.getLogger('topi')
 
@@ -145,8 +146,8 @@ def _pack_data(cfg, data, kernel):
 
     return data, kernel
 
-@autotvm.register_topi_compute("conv2d_NCHW_small.x86")
-def conv2d_NCHW_small(cfg, data, kernel, strides, padding, dilation, layout, out_layout, out_dtype):
+@autotvm.register_topi_compute("conv2d_NCHWc_small.x86")
+def conv2d_NCHWc_small(cfg, data, kernel, strides, padding, dilation, layout, out_layout, out_dtype):
     """Compute conv2d with NCHWc layout."""
     # layout and out_layout are not used here,
     # we keep them for debug convenience when dumping autotvm workload
@@ -177,7 +178,7 @@ def conv2d_NCHW_small(cfg, data, kernel, strides, padding, dilation, layout, out
     #    cfg.define_knob("unroll_kw", [True, False])
 
     cfg.define_reorder('reorder_0', 
-            [n, ci, co, oh, ow, vci, kh, kw, vh, vw, vco],
+            [n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco],
             policy='candidate', candidate=[
                 [n, co, oh, ow, ci, kh, kw, vci, vh, vw, vco]
                 ])
@@ -222,8 +223,8 @@ def conv2d_NCHW_small(cfg, data, kernel, strides, padding, dilation, layout, out
                            out_layout,
                            out_dtype)
 
-@autotvm.register_topi_compute("conv2d_NCHW_wide.x86")
-def conv2d_NCHW_wide(cfg, data, kernel, strides, padding, dilation, layout, out_layout, out_dtype):
+@autotvm.register_topi_compute("conv2d_NCHW_mid.x86")
+def conv2d_NCHW_mid(cfg, data, kernel, strides, padding, dilation, layout, out_layout, out_dtype):
     """Compute conv2d with NCHWc layout."""
     # layout and out_layout are not used here,
     # we keep them for debug convenience when dumping autotvm workload
@@ -252,7 +253,299 @@ def conv2d_NCHW_wide(cfg, data, kernel, strides, padding, dilation, layout, out_
     #cfg.define_knob("unroll_kw", [True, False])
 
     cfg.define_reorder('reorder_0', 
-            [n, ci, co, oh, ow, vci, kh, kw, vh, vw, vco],
+            [n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco],
+            policy='candidate', candidate=[
+                [n, co, oh, ow, ci, kh, kw, vci, vco, vh, vw], #0
+                [n, co, oh, ow, ci, vco, vci, kh, kw, vw, vh], #1
+                [n, co, oh, ow, ci, vco, vh, vw, vci, kh, kw], #2
+                [n, co, oh, ow, ci, vco, vh, vw, vci, kw, kh], #3
+                [n, co, oh, ow, ci, vci, vh, kh, kw, vw, vco], #4
+                [n, co, oh, ow, ci, vci, vw, kh, kw, vh, vco], #5
+                [n, co, oh, ow, ci, vci, vh, vw, kh, kw, vco], #6
+                [n, co, oh, ow, ci, vci, vh, vw, kw, kh, vco] #7
+                ])
+
+    # If no config was set, we can fallback to default config.
+    if cfg.is_fallback:
+        _get_default_config(cfg, te.placeholder((n, in_channel, ih, iw), dtype=data.dtype),
+                            te.placeholder((num_filter, in_channel, kernel_height, kernel_width),
+                                           dtype=kernel.dtype),
+                            strides, padding, out_dtype)
+
+    return nn.conv2d_nchw(data,
+                           kernel,
+                           strides,
+                           padding,
+                           dilation,
+                           out_dtype=out_dtype)
+
+
+@autotvm.register_topi_compute("conv2d_NCHWc_mid.x86")
+def conv2d_NCHWc_mid(cfg, data, kernel, strides, padding, dilation, layout, out_layout, out_dtype):
+    """Compute conv2d with NCHWc layout."""
+    # layout and out_layout are not used here,
+    # we keep them for debug convenience when dumping autotvm workload
+    n_num, in_channel, ih, iw = get_const_tuple(data.shape)
+    num_filter, _, kernel_height, kernel_width = get_const_tuple(kernel.shape)
+
+    # Define autotvm tuning space
+    is_kernel_1x1 = kernel_height == 1 and kernel_width == 1
+    pt, pl, pb, pr = get_pad_tuple(padding, (kernel_height, kernel_width))
+    sh, sw = strides if isinstance(strides, (tuple, list)) else (strides, strides)
+    oh = (ih - kernel_height + pt + pb) // sh + 1
+    oh_num = oh
+    ow = (iw - kernel_width + pl + pr) // sw + 1
+
+    # ================== Define configuration space ===================
+    n = cfg.axis(n_num)
+    oh = cfg.axis(oh)
+    kh, kw = cfg.reduce_axis(kernel_height), cfg.reduce_axis(kernel_width)
+
+    ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
+    ##ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
+    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
+    oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
+    ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
+
+    #cfg.define_knob("unroll_kw", [True, False])
+
+    cfg.define_reorder('reorder_0', 
+            [n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco],
+            policy='candidate', candidate=[
+                [n, co, oh, ow, ci, kh, kw, vci, vco, vh, vw], #0
+                [n, co, oh, ow, ci, vco, vci, kh, kw, vw, vh], #1
+                [n, co, oh, ow, ci, vco, vh, vw, vci, kh, kw], #2
+                [n, co, oh, ow, ci, vco, vh, vw, vci, kw, kh], #3
+                [n, co, oh, ow, ci, vci, vh, kh, kw, vw, vco], #4
+                [n, co, oh, ow, ci, vci, vw, kh, kw, vh, vco], #5
+                [n, co, oh, ow, ci, vci, vh, vw, kh, kw, vco], #6
+                [n, co, oh, ow, ci, vci, vh, vw, kw, kh, vco] #7
+                ])
+
+    # If no config was set, we can fallback to default config.
+    if cfg.is_fallback:
+        _get_default_config(cfg, te.placeholder((n, in_channel, ih, iw), dtype=data.dtype),
+                            te.placeholder((num_filter, in_channel, kernel_height, kernel_width),
+                                           dtype=kernel.dtype),
+                            strides, padding, out_dtype)
+
+    # Pack data if raw 4-D data is provided.
+    # This can only happen when autotuning.
+    if len(data.shape) == 4:
+        #if autotvm.GLOBAL_SCOPE.in_tuning:
+            # Directly use modified data layout placeholder.
+        dshape = (n_num, in_channel // cfg["tile_ic"].size[-1],
+                  ih, iw, cfg["tile_ic"].size[-1])
+        data = tvm.te.placeholder(dshape, data.dtype, name="data")
+        kshape = (num_filter // cfg["tile_oc"].size[-1],
+                  in_channel // cfg["tile_ic"].size[-1],
+                  kernel_height, kernel_width,
+                  cfg["tile_ic"].size[-1],
+                  cfg["tile_oc"].size[-1])
+        kernel = tvm.te.placeholder(kshape, kernel.dtype, name="kernel")
+        #else:
+        #    data, kernel = _pack_data(cfg, data, kernel)
+
+    #return nn.conv2d_nchw(data,
+    #                       kernel,
+    #                       strides,
+    #                       padding,
+    #                       dilation,
+    #                       out_dtype=out_dtype)
+
+    return nn.conv2d_NCHWc(data,
+                           kernel,
+                           strides,
+                           padding,
+                           dilation,
+                           layout,
+                           out_layout,
+                           out_dtype)
+
+@autotvm.register_topi_compute("conv2d_NCHW_wide.x86")
+def conv2d_NCHW_wide(cfg, data, kernel, strides, padding, dilation, layout, out_layout, out_dtype):
+    """Compute conv2d with NCHW layout."""
+    # layout and out_layout are not used here,
+    # we keep them for debug convenience when dumping autotvm workload
+    n_num, in_channel, ih, iw = get_const_tuple(data.shape)
+    num_filter, _, kernel_height, kernel_width = get_const_tuple(kernel.shape)
+
+    # Define autotvm tuning space
+    is_kernel_1x1 = kernel_height == 1 and kernel_width == 1
+    pt, pl, pb, pr = get_pad_tuple(padding, (kernel_height, kernel_width))
+    sh, sw = strides if isinstance(strides, (tuple, list)) else (strides, strides)
+    oh = (ih - kernel_height + pt + pb) // sh + 1
+    oh_num = oh
+    ow = (iw - kernel_width + pl + pr) // sw + 1
+
+    # ================== Define configuration space ===================
+    n = cfg.axis(n_num)
+    oh = cfg.axis(oh)
+    kh, kw = cfg.reduce_axis(kernel_height), cfg.reduce_axis(kernel_width)
+
+    ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
+    ##ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
+    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
+    oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
+    ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
+
+    #cfg.define_knob("unroll_kw", [True, False])
+
+    cfg.define_reorder('reorder_0', 
+            [n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco],
+            policy='candidate', candidate=[
+                [n, co, oh, ow, ci, kh, kw, vci, vco, vh, vw],
+                [n, co, oh, ow, ci, kh, kw, vci, vco, vw, vh],
+                [n, co, oh, ow, ci, kh, kw, vci, vh, vco, vw],
+                [n, co, oh, ow, ci, kh, kw, vci, vw, vco, vh],
+                [n, co, oh, ow, ci, kh, kw, vci, vh, vw, vco],
+                [n, co, oh, ow, ci, kh, kw, vci, vw, vh, vco],
+                [n, co, oh, ow, ci, kh, kw, vco, vci, vh, vw],
+                [n, co, oh, ow, ci, kh, kw, vco, vci, vw, vh],
+                [n, co, oh, ow, ci, kh, kw, vh, vci, vco, vw],
+                [n, co, oh, ow, ci, kh, kw, vw, vci, vco, vh],
+                [n, co, oh, ow, ci, kh, kw, vh, vci, vw, vco],
+                [n, co, oh, ow, ci, kh, kw, vw, vci, vh, vco],
+                [n, co, oh, ow, ci, kh, kw, vco, vh, vci, vw],
+                [n, co, oh, ow, ci, kh, kw, vco, vw, vci, vh],
+                [n, co, oh, ow, ci, kh, kw, vh, vco, vci, vw],
+                [n, co, oh, ow, ci, kh, kw, vw, vco, vci, vh],
+                [n, co, oh, ow, ci, kh, kw, vh, vw, vci, vco],
+                [n, co, oh, ow, ci, kh, kw, vw, vh, vci, vco],
+                [n, co, oh, ow, ci, kh, kw, vco, vh, vw, vci],
+                [n, co, oh, ow, ci, kh, kw, vco, vw, vh, vci],
+                [n, co, oh, ow, ci, kh, kw, vh, vco, vw, vci],
+                [n, co, oh, ow, ci, kh, kw, vw, vco, vh, vci],
+                [n, co, oh, ow, ci, kh, kw, vh, vw, vco, vci],
+                [n, co, oh, ow, ci, kh, kw, vw, vh, vco, vci]
+                ])
+
+    # If no config was set, we can fallback to default config.
+    if cfg.is_fallback:
+        _get_default_config(cfg, te.placeholder((n, in_channel, ih, iw), dtype=data.dtype),
+                            te.placeholder((num_filter, in_channel, kernel_height, kernel_width),
+                                           dtype=kernel.dtype),
+                            strides, padding, out_dtype)
+
+
+    return nn.conv2d_nchw(data,
+                           kernel,
+                           strides,
+                           padding,
+                           dilation,
+                           out_dtype=out_dtype)
+
+
+
+@autotvm.register_topi_compute("conv2d_NCHWc_huge.x86")
+def conv2d_NCHWc_huge(cfg, data, kernel, strides, padding, dilation, layout, out_layout, out_dtype):
+    """Compute conv2d with NCHWc layout."""
+    # layout and out_layout are not used here,
+    # we keep them for debug convenience when dumping autotvm workload
+    n_num, in_channel, ih, iw = get_const_tuple(data.shape)
+    num_filter, _, kernel_height, kernel_width = get_const_tuple(kernel.shape)
+
+    # Define autotvm tuning space
+    is_kernel_1x1 = kernel_height == 1 and kernel_width == 1
+    pt, pl, pb, pr = get_pad_tuple(padding, (kernel_height, kernel_width))
+    sh, sw = strides if isinstance(strides, (tuple, list)) else (strides, strides)
+    oh = (ih - kernel_height + pt + pb) // sh + 1
+    oh_num = oh
+    ow = (iw - kernel_width + pl + pr) // sw + 1
+
+    # ================== Define configuration space ===================
+    n = cfg.axis(n_num)
+    oh = cfg.axis(oh)
+    kh, kw = cfg.reduce_axis(kernel_height), cfg.reduce_axis(kernel_width)
+
+    ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
+    ##ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
+    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
+    oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
+    ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
+
+    #cfg.define_knob("unroll_kw", [True, False])
+
+    perms = []
+    for perm in permutations([ [n, co, oh], [ow], [ci] ]):
+        start = perm[0] + perm[1] + perm[2]
+        for end in permutations([vci, kh, kw, vh, vw, vco]):
+            perms.append(start + list(end))
+    cfg.define_reorder('reorder_0', 
+            [n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco],
+            policy='candidate', candidate=perms)
+
+    # If no config was set, we can fallback to default config.
+    if cfg.is_fallback:
+        _get_default_config(cfg, te.placeholder((n, in_channel, ih, iw), dtype=data.dtype),
+                            te.placeholder((num_filter, in_channel, kernel_height, kernel_width),
+                                           dtype=kernel.dtype),
+                            strides, padding, out_dtype)
+
+    # Pack data if raw 4-D data is provided.
+    # This can only happen when autotuning.
+    if len(data.shape) == 4:
+        #if autotvm.GLOBAL_SCOPE.in_tuning:
+            # Directly use modified data layout placeholder.
+        dshape = (n_num, in_channel // cfg["tile_ic"].size[-1],
+                  ih, iw, cfg["tile_ic"].size[-1])
+        data = tvm.te.placeholder(dshape, data.dtype, name="data")
+        kshape = (num_filter // cfg["tile_oc"].size[-1],
+                  in_channel // cfg["tile_ic"].size[-1],
+                  kernel_height, kernel_width,
+                  cfg["tile_ic"].size[-1],
+                  cfg["tile_oc"].size[-1])
+        kernel = tvm.te.placeholder(kshape, kernel.dtype, name="kernel")
+        #else:
+        #    data, kernel = _pack_data(cfg, data, kernel)
+
+    #return nn.conv2d_nchw(data,
+    #                       kernel,
+    #                       strides,
+    #                       padding,
+    #                       dilation,
+    #                       out_dtype=out_dtype)
+
+    return nn.conv2d_NCHWc(data,
+                           kernel,
+                           strides,
+                           padding,
+                           dilation,
+                           layout,
+                           out_layout,
+                           out_dtype)
+
+@autotvm.register_topi_compute("conv2d_NCHWc_wide.x86")
+def conv2d_NCHWc_wide(cfg, data, kernel, strides, padding, dilation, layout, out_layout, out_dtype):
+    """Compute conv2d with NCHWc layout."""
+    # layout and out_layout are not used here,
+    # we keep them for debug convenience when dumping autotvm workload
+    n_num, in_channel, ih, iw = get_const_tuple(data.shape)
+    num_filter, _, kernel_height, kernel_width = get_const_tuple(kernel.shape)
+
+    # Define autotvm tuning space
+    is_kernel_1x1 = kernel_height == 1 and kernel_width == 1
+    pt, pl, pb, pr = get_pad_tuple(padding, (kernel_height, kernel_width))
+    sh, sw = strides if isinstance(strides, (tuple, list)) else (strides, strides)
+    oh = (ih - kernel_height + pt + pb) // sh + 1
+    oh_num = oh
+    ow = (iw - kernel_width + pl + pr) // sw + 1
+
+    # ================== Define configuration space ===================
+    n = cfg.axis(n_num)
+    oh = cfg.axis(oh)
+    kh, kw = cfg.reduce_axis(kernel_height), cfg.reduce_axis(kernel_width)
+
+    ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
+    ##ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
+    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
+    oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
+    ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
+
+    #cfg.define_knob("unroll_kw", [True, False])
+
+    cfg.define_reorder('reorder_0', 
+            [n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco],
             policy='candidate', candidate=[
                 [n, co, oh, ow, ci, kh, kw, vci, vco, vh, vw],
                 [n, co, oh, ow, ci, kh, kw, vci, vco, vw, vh],
@@ -384,14 +677,72 @@ def conv2d_NCHWc(cfg, data, kernel, strides, padding, dilation, layout, out_layo
                            out_layout,
                            out_dtype)
 
-@autotvm.register_topi_schedule("conv2d_NCHW_small.x86")
-def schedule_conv2d_NCHW_small(cfg, outs):
+@autotvm.register_topi_schedule("conv2d_NCHWc_small.x86")
+def schedule_conv2d_NCHWc_small(cfg, outs):
     """Create schedule for tensors"""
     outs = [outs] if isinstance(outs, te.tensor.Tensor) else outs
     s = te.create_schedule([x.op for x in outs])
 
     def _callback(op):
         if 'conv2d_NCHWc' in op.tag:
+            conv_out = op.output(0)
+            kernel_vec = conv_out.op.input_tensors[1]
+            data_vec = conv_out.op.input_tensors[0]
+
+            args = [s, cfg, data_vec, kernel_vec, conv_out, outs[0]]
+            
+            conv2d_avx_common._schedule_conv_NCHWc_dv(*args)
+
+    traverse_inline(s, outs[0].op, _callback)
+    return s
+
+@autotvm.register_topi_schedule("conv2d_NCHWc_huge.x86")
+def schedule_conv2d_NCHWc_huge(cfg, outs):
+    """Create schedule for tensors"""
+    outs = [outs] if isinstance(outs, te.tensor.Tensor) else outs
+    s = te.create_schedule([x.op for x in outs])
+
+    def _callback(op):
+        if 'conv2d_NCHWc' in op.tag:
+            conv_out = op.output(0)
+            kernel_vec = conv_out.op.input_tensors[1]
+            data_vec = conv_out.op.input_tensors[0]
+
+            args = [s, cfg, data_vec, kernel_vec, conv_out, outs[0]]
+            
+            conv2d_avx_common._schedule_conv_NCHWc_dv(*args)
+
+    traverse_inline(s, outs[0].op, _callback)
+    return s
+
+@autotvm.register_topi_schedule("conv2d_NCHWc_wide.x86")
+def schedule_conv2d_NCHWc_wide(cfg, outs):
+    """Create schedule for tensors"""
+    outs = [outs] if isinstance(outs, te.tensor.Tensor) else outs
+    s = te.create_schedule([x.op for x in outs])
+
+    def _callback(op):
+        if 'conv2d_NCHWc' in op.tag:
+            conv_out = op.output(0)
+            kernel_vec = conv_out.op.input_tensors[1]
+            data_vec = conv_out.op.input_tensors[0]
+
+            args = [s, cfg, data_vec, kernel_vec, conv_out, outs[0]]
+            
+            conv2d_avx_common._schedule_conv_NCHWc_dv(*args)
+
+    traverse_inline(s, outs[0].op, _callback)
+    return s
+
+
+@autotvm.register_topi_schedule("conv2d_NCHW_wide.x86")
+def schedule_conv2d_NCHW_wide(cfg, outs):
+    """Create schedule for tensors"""
+    outs = [outs] if isinstance(outs, te.tensor.Tensor) else outs
+    s = te.create_schedule([x.op for x in outs])
+
+    def _callback(op):
+        if 'conv2d_nchw' in op.tag:
             conv_out = op.output(0)
             kernel_vec = conv_out.op.input_tensors[1]
             data_vec = conv_out.op.input_tensors[0]
@@ -403,8 +754,27 @@ def schedule_conv2d_NCHW_small(cfg, outs):
     traverse_inline(s, outs[0].op, _callback)
     return s
 
-@autotvm.register_topi_schedule("conv2d_NCHW_wide.x86")
-def schedule_conv2d_NCHW_wide(cfg, outs):
+@autotvm.register_topi_schedule("conv2d_NCHW_mid.x86")
+def schedule_conv2d_NCHW_mid(cfg, outs):
+    """Create schedule for tensors"""
+    outs = [outs] if isinstance(outs, te.tensor.Tensor) else outs
+    s = te.create_schedule([x.op for x in outs])
+
+    def _callback(op):
+        if 'conv2d_nchw' in op.tag:
+            conv_out = op.output(0)
+            kernel_vec = conv_out.op.input_tensors[1]
+            data_vec = conv_out.op.input_tensors[0]
+
+            args = [s, cfg, data_vec, kernel_vec, conv_out, outs[0]]
+            
+            conv2d_avx_common._schedule_conv_NCHW_dv(*args)
+
+    traverse_inline(s, outs[0].op, _callback)
+    return s
+
+@autotvm.register_topi_schedule("conv2d_NCHWc_mid.x86")
+def schedule_conv2d_NCHWc_mid(cfg, outs):
     """Create schedule for tensors"""
     outs = [outs] if isinstance(outs, te.tensor.Tensor) else outs
     s = te.create_schedule([x.op for x in outs])
@@ -417,7 +787,7 @@ def schedule_conv2d_NCHW_wide(cfg, outs):
 
             args = [s, cfg, data_vec, kernel_vec, conv_out, outs[0]]
             
-            conv2d_avx_common._schedule_conv_NCHW_dv(*args)
+            conv2d_avx_common._schedule_conv_NCHWc_dv(*args)
 
     traverse_inline(s, outs[0].op, _callback)
     return s

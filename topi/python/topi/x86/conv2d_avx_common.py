@@ -82,6 +82,50 @@ def _fallback_schedule_int8(cfg, wkl):
 
 
 def _schedule_conv_NCHW_dv(s, cfg, data_vec, kernel_vec, conv_out, last):
+    n, co, oh, ow  = s[conv_out].op.axis
+    ci, kh, kw = s[conv_out].op.reduce_axis
+    vci_n = cfg['tile_ic'].size[-1]
+    vco_n = cfg['tile_oc'].size[-1]
+    vh_n = cfg['tile_oh'].size[-1]
+    vw_n = cfg['tile_ow'].size[-1]
+    co_n = co.dom.extent.value 
+    oh_n = oh.dom.extent.value // vh_n
+    ow_n = ow.dom.extent.value // vw_n
+    ci_n = ci.dom.extent.value // vci_n
+    n_n = n.dom.extent.value
+    kh_n = kh.dom.extent.value
+    kw_n = kw.dom.extent.value
+    cfg.extents = [n_n, co_n, oh_n, ow_n, ci_n, vci_n, kh_n, kw_n, vh_n, vw_n, vco_n]
+    cfg.arrays = None
+    order = cfg['reorder_0'].perm #[n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco]
+    cfg.array_dims = [ [0,2,3,4,6,7,8,9,5], [1,4,5,6,7,10], [0,1,2,3,8,9,10] ]
+    cfg.conv_dims = [ [(2,8), (6,)], [(3,9), (7,)] ]
+    cfg.fastest_varying = [ [8], [6], [8]]
+
+    # schedule conv
+    ci, vci = s[conv_out].split(ci, factor=vci_n)
+    co, vco = s[conv_out].split(co, factor=vco_n)
+    oh, vh = s[conv_out].split(oh, factor=vh_n)
+    ow, vw = s[conv_out].split(ow, factor=vw_n)
+    order = [n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco]
+    cfg['reorder_0'].apply(s, conv_out, order)
+
+    # schedule fusion
+    #reg_n, unroll_kw = cfg["tile_ow"].size[-1], cfg["unroll_kw"].val
+    #if unroll_kw:
+    #    s[last].unroll(kw)
+
+    # mark parallel
+
+    s[conv_out].vectorize(vco)
+    s[conv_out].unroll(vw)
+
+    parallel_axis = s[conv_out].fuse(n, co, oh)
+    s[last].parallel(parallel_axis)
+    return s
+
+
+def _schedule_conv_NCHWc_dv(s, cfg, data_vec, kernel_vec, conv_out, last):
     n, co, oh, ow, vco = s[conv_out].op.axis
     ci, kh, kw = s[conv_out].op.reduce_axis
     vci_n = cfg['tile_ic'].size[-1]
@@ -96,11 +140,15 @@ def _schedule_conv_NCHW_dv(s, cfg, data_vec, kernel_vec, conv_out, last):
     n_n = n.dom.extent.value
     kh_n = kh.dom.extent.value
     kw_n = kw.dom.extent.value
-    cfg.extents = [n_n, ci_n, co_n, oh_n, ow_n, vci_n, kh_n, kw_n, vh_n, vw_n, vco_n]
-    order = cfg['reorder_0'].perm #[n, ci, co, oh, ow, vci, kh, kw, vh, vw, vco]
-    cfg.array_dims = [ [0,1,3,4,6,7,8,9,5], [1,2,5,6,7,10], [0,2,3,4,8,9,10] ]
-    cfg.conv_dims = [ [(3,8), (6,)], [(4,9), (7,)] ]
-    cfg.fastest_varying = [ [5], [10], [10]]
+    cfg.extents = [n_n, co_n, oh_n, ow_n, ci_n, vci_n, kh_n, kw_n, vh_n, vw_n, vco_n]
+    cfg.arrays = None
+    order = cfg['reorder_0'].perm #[n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco]
+    #cfg.array_dims = [ [0,2,3,4,6,7,8,9,5], [1,4,5,6,7,10], [0,1,2,3,8,9,10] ]
+    #cfg.conv_dims = [ [(2,8), (6,)], [(3,9), (7,)] ]
+    #cfg.fastest_varying = [ [5], [10], [10]]
+    cfg.array_dims = [ [1,3,4,5,7,8,9,10,6], [2,5,6,7,8,11], [1,2,3,4,9,10,11] ]
+    cfg.conv_dims = [ [(3,9), (7,)], [(4,10), (8,)] ]
+    cfg.fastest_varying = [ [6], [11], [11]]
 
 
     if isinstance(s[data_vec].op, tvm.te.ComputeOp) \
@@ -135,7 +183,7 @@ def _schedule_conv_NCHW_dv(s, cfg, data_vec, kernel_vec, conv_out, last):
     #co, vco = s[conv_out].split(co, factor=vco_n)
     oh, vh = s[conv_out].split(oh, factor=vh_n)
     ow, vw = s[conv_out].split(ow, factor=vw_n)
-    order = [n, ci, co, oh, ow, vci, kh, kw, vh, vw, vco]
+    order = [n, co, oh, ow, ci, vci, kh, kw, vh, vw, vco]
     cfg['reorder_0'].apply(s, conv_out, order)
 
     # schedule fusion
@@ -145,30 +193,13 @@ def _schedule_conv_NCHW_dv(s, cfg, data_vec, kernel_vec, conv_out, last):
 
     # mark parallel
 
-    s[conv_out].vectorize(vco)
-    s[conv_out].unroll(vw)
+    #s[conv_out].vectorize(vco)
+    #s[conv_out].unroll(vw)
 
     parallel_axis = s[conv_out].fuse(n, co, oh)
     s[last].parallel(parallel_axis)
     return s
 
-
-    # fetch schedule
-    reg_n, unroll_kw = cfg["tile_ow"].size[-1], cfg["unroll_kw"].val
-
-    # schedule 5-D NCHW[x]c conv
-    C, O = conv_out, last
-
-    batch, oc_chunk, oh, ow, oc_block = s[C].op.axis
-    ow_chunk, ow_block = s[C].split(ow, factor=reg_n)
-    s[C].reorder(oc_chunk, oh, ow_chunk, ow_block, oc_block)
-    parallel_axis = s[C].fuse(batch, oc_chunk, oh)
-    s[C].vectorize(oc_block)
-    if C == O:
-        s[C].parallel(parallel_axis)
-
-
-    return s
 
 def _schedule_conv_NCHWc(s, cfg, data_vec, kernel_vec, conv_out, last):
     # fetch schedule

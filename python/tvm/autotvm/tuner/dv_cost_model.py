@@ -22,10 +22,6 @@ import logging
 import time
 
 import numpy as np
-try:
-    import xgboost as xgb
-except ImportError:
-    xgb = None
 
 from .. import feature
 from ..util import get_rank
@@ -37,8 +33,31 @@ import tvm
 
 logger = logging.getLogger('autotvm')
 
-class XGBoostCostModel(CostModel):
-    """XGBoost as cost model
+class DataVolumePredictor():
+    def __init__(self, output_type):
+        def sum_datavol(datavol):
+            assert(len(datavol.shape) == 2)
+            return -1*(datavol[:,0]/datavol[:,0].max() + datavol[:,1]/datavol[:,1].max() + datavol[:,2]/datavol[:,2].max() )
+        
+        def sum_datavolL2L3(datavol):
+            assert(len(datavol.shape) == 2)
+            return -1*(datavol[:,1]/datavol[:,1].max() + datavol[:,2]/datavol[:,2].max() )
+        
+        def time_estimate(datavol):
+            assert(len(datavol.shape) == 2)
+            return -1*(datavol[:,0]*64/100e9 + datavol[:,1]*64/44e9 + datavol[:,2]*64/25e9 )
+
+        if output_type == 'sum':
+            self.predict = sum_datavol
+        elif output_type == 'sumL2L3':
+            self.predict = sum_datavolL2L3
+        elif output_type == 'time':
+            self.predict = time_estimate
+    
+
+
+class DataVolumeCostModel(CostModel):
+    """
 
     Parameters
     ----------
@@ -72,76 +91,22 @@ class XGBoostCostModel(CostModel):
     upper_model: XGBoostCostModel, optional
         The upper model used in transfer learning
     """
-    def __init__(self, task, feature_type, loss_type, num_threads=None, log_interval=25,
+    def __init__(self, task, feature_type, prediction_type='sumL2L3', num_threads=None,
                  upper_model=None):
-        super(XGBoostCostModel, self).__init__()
-
-        if xgb is None:
-            raise RuntimeError("XGBoost is required for XGBoostCostModel. "
-                               "Please install its python package first. "
-                               "Help: (https://xgboost.readthedocs.io/en/latest/) ")
+        super(DataVolumeCostModel, self).__init__()
 
         self.task = task
         self.target = task.target
         self.space = task.config_space
 
         self.fea_type = feature_type
-        self.loss_type = loss_type
         self.num_threads = num_threads
-        self.log_interval = log_interval
 
         self.saved_features = {'scores':[]}
 
-        if loss_type == 'reg':
-            self.xgb_params = {
-                'max_depth': 3,
-                'gamma': 0.0001,
-                'min_child_weight': 1,
+        self.bst = DataVolumePredictor(prediction_type)
 
-                'subsample': 1.0,
-
-                'eta': 0.3,
-                'lambda': 1.00,
-                'alpha': 0,
-
-                'objective': 'reg:linear',
-            }
-        elif loss_type == 'rank':
-            self.xgb_params = {
-                'max_depth': 3,
-                'gamma': 0.0001,
-                'min_child_weight': 1,
-
-                'subsample': 1.0,
-
-                'eta': 0.3,
-                'lambda': 1.00,
-                'alpha': 0,
-
-                'objective': 'rank:pairwise',
-            }
-        else:
-            raise RuntimeError("Invalid loss type: " + loss_type)
-
-        self.xgb_params['verbosity'] = 0
-        if num_threads:
-            self.xgb_params['nthread'] = num_threads
-        self.bst = None
-
-        if feature_type == 'itervar':
-            self.feature_extract_func = _extract_itervar_feature_index
-        elif feature_type == 'datavol_repeat':
-            self.feature_extract_func = _extract_datavol_repeat_feature_index
-        elif feature_type == 'datavol':
-            self.feature_extract_func = _extract_datavol_feature_index
-        elif feature_type == 'datavol_itervar' or feature_type == 'itervar_silent_dv':
-            self.feature_extract_func = _extract_datavol_itervar_feature_index
-        elif feature_type == 'knob':
-            self.feature_extract_func = _extract_knob_feature_index
-        elif feature_type == 'curve':
-            self.feature_extract_func = _extract_curve_feature_index
-        else:
-            raise RuntimeError("Invalid feature type " + feature_type)
+        self.feature_extract_func = _extract_datavol_feature_index
 
         if upper_model:  # share a same feature cache with upper model
             self.feature_cache = upper_model.feature_cache
@@ -182,9 +147,6 @@ class XGBoostCostModel(CostModel):
             return self.upper_model._get_pool()
         return self.pool
 
-    def _base_model_discount(self):
-        return 1.0 / (2 ** (self._sample_size / 64.0))
-
     def fit_random(self, xs, ys, plan_size):
 
         x_train = self._get_feature(xs, save_features=True)
@@ -200,120 +162,18 @@ class XGBoostCostModel(CostModel):
 
         valid_index = y_train > 1e-6
         index = np.random.permutation(len(x_train))
-        dtrain = xgb.DMatrix(x_train[index], y_train[index])
         self._sample_size = len(x_train)
-
-        if self.base_model:
-            discount = self._base_model_discount()
-            if discount < 0.05:  # discard base model
-                self.base_model.upper_model = None
-                self.base_model = None
-            else:
-                dtrain.set_base_margin(discount * self.base_model.predict(xs, output_margin=True))
 
         # Get scores for testing datavol features
         if self.bst != None:
-            scores = self.bst.predict(dtrain)
+            scores = self.bst.predict(x_train)
             self.saved_features['scores'].append((xs.copy(), scores))
 
-        self.bst = xgb.train(self.xgb_params, dtrain,
-                             num_boost_round=8000,
-                             callbacks=[custom_callback(
-                                 stopping_rounds=20,
-                                 metric='tr-a-recall@%d' % plan_size,
-                                 evals=[(dtrain, 'tr')],
-                                 maximize=True,
-                                 fevals=[
-                                     xgb_average_recalln_curve_score(plan_size),
-                                 ],
-                                 verbose_eval=self.log_interval)])
-
-
-        logger.debug("XGB train: %.2f\tobs: %d\terror: %d\tn_cache: %d",
-                     time.time() - tic, len(xs),
-                     len(xs) - np.sum(valid_index),
-                     self.feature_cache.size(self.fea_type))
-
-    def fit_log(self, records, plan_size):
-        tic = time.time()
-
-        # filter data, only pick the data with a same task
-        data = []
-        for inp, res in records:
-            if inp.task.name == self.task.name:
-                data.append((inp, res))
-
-        logger.debug("XGB load %d entries from history log file", len(data))
-
-        # extract feature
-        self._reset_pool(self.space, self.target, self.task)
-        pool = self._get_pool()
-        if self.fea_type == 'itervar':
-            feature_extract_func = _extract_itervar_feature_log
-        elif self.fea_type == 'knob':
-            feature_extract_func = _extract_knob_feature_log
-        elif self.fea_type == 'curve':
-            feature_extract_func = _extract_curve_feature_log
-        else:
-            raise RuntimeError("Invalid feature type: " + self.fea_type)
-        res = pool.map(feature_extract_func, data)
-
-        # filter out feature with different shapes
-        fea_len = len(self._get_feature([0])[0])
-
-        xs, ys = [], []
-        for x, y in res:
-            if len(x) == fea_len:
-                xs.append(x)
-                ys.append(y)
-
-        if len(xs) < 500:  # no enough samples
-            return False
-
-        xs, ys = np.array(xs), np.array(ys)
-        x_train = xs
-        y_train = ys
-        y_max = np.max(y_train)
-        y_train = y_train / max(y_max, 1e-8)
-
-        index = np.random.permutation(len(x_train))
-        dtrain = xgb.DMatrix(x_train[index], y_train[index])
-
-        plan_size *= 2
-        self.bst = xgb.train(self.xgb_params, dtrain,
-                             num_boost_round=400,
-                             callbacks=[custom_callback(
-                                 stopping_rounds=100,
-                                 metric='tr-a-recall@%d' % plan_size,
-                                 evals=[(dtrain, 'tr')],
-                                 maximize=True,
-                                 fevals=[
-                                     xgb_average_recalln_curve_score(plan_size),
-                                 ],
-                                 verbose_eval=self.log_interval)])
-
-        logger.debug("XGB train: %.2f\tobs: %d", time.time() - tic, len(xs))
-
-        return True
 
     def predict(self, xs, output_margin=False):
         feas = self._get_feature(xs)
-        dtest = xgb.DMatrix(feas)
 
-        if self.base_model:
-            dtest.set_base_margin(self._base_model_discount() *
-                                  self.base_model.predict(xs, output_margin=True))
-
-        return self.bst.predict(dtest, output_margin=output_margin)
-
-    def load_basemodel(self, base_model):
-        self.base_model = base_model
-        self.base_model._close_pool()
-        self.base_model.upper_model = self
-
-    def spawn_base_model(self):
-        return XGBoostCostModel(self.task, self.fea_type, self.loss_type,
-                                self.num_threads, self.log_interval, self)
+        return self.bst.predict(feas)
 
     def _get_feature(self, indexes, save_features=False):
         """get features for indexes, run extraction if we do not have cache for them"""
@@ -328,15 +188,10 @@ class XGBoostCostModel(CostModel):
 
         if need_extract:
             feas = []
-            for ind in need_extract:
-                feas.append(self.feature_extract_func(ind))
-            #pool = self._get_pool()
-            #feas = pool.map(self.feature_extract_func, need_extract)
+            pool = self._get_pool()
+            feas = pool.map(self.feature_extract_func, need_extract)
             for i, fea in zip(need_extract, feas):
-                if self.fea_type == 'itervar_silent_dv':
-                    fea_cache[i] = fea[0][:-7]
-                else:
-                    fea_cache[i] = fea[0]
+                fea_cache[i] = fea[0]
                 if save_features:
                     if i in self.saved_features.keys():
                         self.saved_features[i].set_feature(fea[0])
@@ -364,43 +219,7 @@ _extract_space = None
 _extract_target = None
 _extract_task = None
 
-def _extract_itervar_feature_index(index):
-    """extract iteration var feature for an index in extract_space"""
-    try:
-        config = _extract_space.get(index)
-        with _extract_target:
-            sch, args = _extract_task.instantiate(config)
-        fea = feature.get_itervar_feature_flatten(sch, args, take_log=True)
-        fea = np.concatenate((fea, list(config.get_other_option().values())))
-        return fea, config
-    except Exception:  # pylint: disable=broad-except
-        return None
-
-def _extract_datavol_itervar_feature_index(index):
-    #try:
-        config = _extract_space.get(index)
-        config_features = []
-        for param in config.to_json_dict()['entity']:
-            if param[1] == 'sp':
-                config_features += param[-1][1:]
-            elif param[1] == 'an':
-                for setting in param[-1]:
-                    config_features += [int(setting != 'none')]
-        with _extract_target:
-            sch, args = _extract_task.instantiate(config)
-        fea = feature.get_itervar_feature_flatten(sch, args, take_log=True)
-        if config.arrays != None:
-            d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-                    config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying, arrays=config.arrays)
-        else:
-            d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-                    config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying)
-        return np.concatenate((fea, list(config.get_other_option().values()), d_vol[2][:,:,-1].sum(axis=0), config_features)), config.to_json_dict()
-    #except Exception:
-    #    return None
-
 def _extract_datavol_feature_index(index):
-    #try:
     config = _extract_space.get(index)
     config_features = []
     for param in config.to_json_dict()['entity']:
@@ -412,47 +231,16 @@ def _extract_datavol_feature_index(index):
     with _extract_target:
         # Get schedule and args, which initializes config to contain schedule info.
         sch, args = _extract_task.instantiate(config)
+    order = [0] + (np.array(config['reorder_0'].perm) + 1).tolist()
     if config.arrays != None:
-        d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-                config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying, arrays=config.arrays)
+        d_foot, d_vol = estimate_dv(config['reorder_0'].perm, [50] + config.extents,
+                config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying, 
+                arrays=config.arrays)
     else:
-        d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
+        d_foot, d_vol = estimate_dv(config['reorder_0'].perm, [50] + config.extents,
                 config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying)
-    #flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-    #d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-    #        config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
-    #flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-    return np.concatenate((d_vol[2][:,:,-1].sum(axis=0), config_features)), config.to_json_dict()
-    #except Exception:
-    #    return None
+    return d_vol[2][:,:,-1].sum(axis=0), config.to_json_dict()
 
-def _extract_datavol_repeat_feature_index(index):
-    #try:
-    config = _extract_space.get(index)
-    config_features = []
-    for param in config.to_json_dict()['entity']:
-        if param[1] == 'sp':
-            config_features += param[-1][1:]
-        elif param[1] == 'an':
-            for setting in param[-1]:
-                config_features += [int(setting != 'none')]
-    with _extract_target:
-        # Get schedule and args, which initializes config to contain schedule info.
-        sch, args = _extract_task.instantiate(config)
-    config.extents[0] *= 16
-    if config.arrays != None:
-        d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-                config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying, arrays=config.arrays)
-    else:
-        d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-                config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying)
-    #flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-    #d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-    #        config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
-    #flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-    return np.concatenate((d_vol[2][:,:,-1].sum(axis=0), config_features)), config.to_json_dict()
-    #except Exception:
-    #    return None
 
 def _extract_itervar_feature_log(arg):
     """extract iteration var feature for log items"""
@@ -527,9 +315,9 @@ def _extract_curve_feature_log(arg):
     except Exception:  # pylint: disable=broad-except
         return None
 
+"""
 def custom_callback(stopping_rounds, metric, fevals, evals=(), log_file=None,
                     maximize=False, verbose_eval=True):
-    """callback function for xgboost to support multiple custom evaluation functions"""
     # pylint: disable=import-outside-toplevel
     from xgboost.core import EarlyStopException
     from xgboost.callback import _fmt_metric
@@ -539,7 +327,6 @@ def custom_callback(stopping_rounds, metric, fevals, evals=(), log_file=None,
     metric_shortname = metric.split("-")[1]
 
     def init(env):
-        """internal function"""
         bst = env.model
 
         state['maximize_score'] = maximize
@@ -561,7 +348,6 @@ def custom_callback(stopping_rounds, metric, fevals, evals=(), log_file=None,
             assert env.cvfolds is not None
 
     def callback(env):
-        """internal function"""
         if not state:
             init(env)
 
@@ -635,6 +421,7 @@ def custom_callback(stopping_rounds, metric, fevals, evals=(), log_file=None,
             raise EarlyStopException(best_iteration)
 
     return callback
+"""
 
 
 # feval wrapper for xgboost
