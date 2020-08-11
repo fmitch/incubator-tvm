@@ -214,7 +214,7 @@ class XGBoostCostModel(CostModel):
         # Get scores for testing datavol features
         if self.bst != None:
             scores = self.bst.predict(dtrain)
-            self.saved_features['scores'].append((xs.copy(), scores))
+            self.saved_features['scores'].append([xs.copy(), scores])
 
         self.bst = xgb.train(self.xgb_params, dtrain,
                              num_boost_round=8000,
@@ -327,11 +327,11 @@ class XGBoostCostModel(CostModel):
         need_extract = [x for x in indexes if x not in fea_cache]
 
         if need_extract:
-            feas = []
-            for ind in need_extract:
-                feas.append(self.feature_extract_func(ind))
-            #pool = self._get_pool()
-            #feas = pool.map(self.feature_extract_func, need_extract)
+            #feas = []
+            #for ind in need_extract:
+            #    feas.append(self.feature_extract_func(ind))
+            pool = self._get_pool()
+            feas = pool.map(self.feature_extract_func, need_extract)
             for i, fea in zip(need_extract, feas):
                 if self.fea_type == 'itervar_silent_dv':
                     fea_cache[i] = fea[0][:-7]
@@ -372,7 +372,7 @@ def _extract_itervar_feature_index(index):
             sch, args = _extract_task.instantiate(config)
         fea = feature.get_itervar_feature_flatten(sch, args, take_log=True)
         fea = np.concatenate((fea, list(config.get_other_option().values())))
-        return fea, config
+        return fea, config.to_json_dict()
     except Exception:  # pylint: disable=broad-except
         return None
 
@@ -410,23 +410,18 @@ def _extract_datavol_feature_index(index):
             for setting in param[-1]:
                 config_features += [int(setting != 'none')]
     with _extract_target:
-        # Get schedule and args, which initializes config to contain schedule info.
         sch, args = _extract_task.instantiate(config)
+        func = tvm.build(sch, args)
     if config.arrays != None:
         d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
                 config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying, arrays=config.arrays)
     else:
         d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
                 config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying)
-    #flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-    #d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-    #        config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
-    #flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-    return np.concatenate((d_vol[2][:,:,-1].sum(axis=0), config_features)), config.to_json_dict()
-    #except Exception:
-    #    return None
+    return np.concatenate((d_vol[2][:,:,-1].sum(axis=0), config_features + ['fmuladd.v8' in func.get_source()])), config.to_json_dict()
 
 def _extract_datavol_repeat_feature_index(index):
+    return None
     #try:
     config = _extract_space.get(index)
     config_features = []
@@ -437,8 +432,8 @@ def _extract_datavol_repeat_feature_index(index):
             for setting in param[-1]:
                 config_features += [int(setting != 'none')]
     with _extract_target:
-        # Get schedule and args, which initializes config to contain schedule info.
         sch, args = _extract_task.instantiate(config)
+        func = tvm.build(sch, args)
     config.extents[0] *= 16
     if config.arrays != None:
         d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
@@ -446,13 +441,7 @@ def _extract_datavol_repeat_feature_index(index):
     else:
         d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
                 config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying)
-    #flat_volume = np.concatenate((d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-    #d_foot, d_vol = estimate_dv(config['reorder_0'].perm, config.extents,
-    #        config.array_dims, cache_sizes, config.conv_dims,use_full_footprint=False)
-    #flat_volume = np.concatenate((flat_volume, d_vol[0][:,:,-1].sum(axis=0), d_vol[1][:,:,-1].sum(axis=0), d_vol[2][:,:,-1].sum(axis=0) ))
-    return np.concatenate((d_vol[2][:,:,-1].sum(axis=0), config_features)), config.to_json_dict()
-    #except Exception:
-    #    return None
+    return np.concatenate((d_vol[2][:,:,-1].sum(axis=0), config_features, 'fmuladd.v8' in func.get_source())), config.to_json_dict()
 
 def _extract_itervar_feature_log(arg):
     """extract iteration var feature for log items"""

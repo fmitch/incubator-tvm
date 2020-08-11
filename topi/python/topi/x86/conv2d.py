@@ -168,7 +168,7 @@ def conv2d_NCHWc_small(cfg, data, kernel, strides, padding, dilation, layout, ou
 
     ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
     #ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
-    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
+    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2, policy="verbose")
     oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 1, policy="verbose")
     ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
 
@@ -246,7 +246,7 @@ def conv2d_NCHW_mid(cfg, data, kernel, strides, padding, dilation, layout, out_l
 
     ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
     ##ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
-    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
+    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2, policy="verbose")
     oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
     ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
 
@@ -303,7 +303,7 @@ def conv2d_NCHWc_mid(cfg, data, kernel, strides, padding, dilation, layout, out_
 
     ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
     ##ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
-    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
+    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2, policy="verbose")
     oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
     ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
 
@@ -385,7 +385,7 @@ def conv2d_NCHW_wide(cfg, data, kernel, strides, padding, dilation, layout, out_
 
     ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
     ##ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
-    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
+    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2, policy="verbose")
     oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
     ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
 
@@ -460,7 +460,7 @@ def conv2d_NCHWc_huge(cfg, data, kernel, strides, padding, dilation, layout, out
 
     ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
     ##ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
-    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
+    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2, policy="verbose")
     oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
     ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
 
@@ -538,7 +538,7 @@ def conv2d_NCHWc_wide(cfg, data, kernel, strides, padding, dilation, layout, out
 
     ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2)
     ##ci, vci = cfg.define_split("tile_ic", in_channel, num_outputs=2, filter=lambda y:y.size[-1] >= 64)
-    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2)
+    co, vco = cfg.define_split("tile_oc", num_filter, num_outputs=2, policy="verbose")
     oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
     ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2, filter=lambda y: y.size[-1] <= 64, policy="verbose")
 

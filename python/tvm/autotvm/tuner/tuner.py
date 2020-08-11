@@ -31,6 +31,7 @@ import subprocess
 logger = logging.getLogger('autotvm')
 import tvm
 import pylikwid
+import time
 
 cache_sizes = [
         int(subprocess.run(['getconf', 'LEVEL1_DCACHE_SIZE'], stdout=subprocess.PIPE).stdout),
@@ -141,6 +142,7 @@ class Tuner(object):
         early_stopping = early_stopping or 1e9
         self.n_trial = n_trial
         self.early_stopping = early_stopping
+        start_time = time.time()
 
         # Validate si_prefix arg
         format_si_prefix(0, si_prefix)
@@ -265,6 +267,8 @@ class Tuner(object):
                         self.cost_model.saved_features[inp.config.index].set_result(res)
                     else:
                         self.cost_model.saved_features[inp.config.index] = SavedFeature(result=res)
+            if len(self.cost_model.saved_features['scores']) > 0:
+                self.cost_model.saved_features['scores'][-1].append(time.time() - start_time)
 
             for callback in callbacks:
                 callback(self, inputs, results)

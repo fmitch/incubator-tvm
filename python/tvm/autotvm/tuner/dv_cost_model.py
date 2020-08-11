@@ -91,7 +91,7 @@ class DataVolumeCostModel(CostModel):
     upper_model: XGBoostCostModel, optional
         The upper model used in transfer learning
     """
-    def __init__(self, task, feature_type, prediction_type='sumL2L3', num_threads=None,
+    def __init__(self, task, feature_type, prediction_type='time', num_threads=None,
                  upper_model=None):
         super(DataVolumeCostModel, self).__init__()
 
@@ -167,7 +167,7 @@ class DataVolumeCostModel(CostModel):
         # Get scores for testing datavol features
         if self.bst != None:
             scores = self.bst.predict(x_train)
-            self.saved_features['scores'].append((xs.copy(), scores))
+            self.saved_features['scores'].append([xs.copy(), scores])
 
 
     def predict(self, xs, output_margin=False):
@@ -231,6 +231,7 @@ def _extract_datavol_feature_index(index):
     with _extract_target:
         # Get schedule and args, which initializes config to contain schedule info.
         sch, args = _extract_task.instantiate(config)
+        func = tvm.build(sch, args)
     order = [0] + (np.array(config['reorder_0'].perm) + 1).tolist()
     if config.arrays != None:
         d_foot, d_vol = estimate_dv(config['reorder_0'].perm, [50] + config.extents,
@@ -239,7 +240,7 @@ def _extract_datavol_feature_index(index):
     else:
         d_foot, d_vol = estimate_dv(config['reorder_0'].perm, [50] + config.extents,
                 config.array_dims, cache_sizes, config.conv_dims, config.fastest_varying)
-    return d_vol[2][:,:,-1].sum(axis=0), config.to_json_dict()
+    return d_vol[2][:,:,-1].sum(axis=0)*(1 + 1e6*('fmuladd.v8' in func.get_source())), config.to_json_dict()
 
 
 def _extract_itervar_feature_log(arg):
