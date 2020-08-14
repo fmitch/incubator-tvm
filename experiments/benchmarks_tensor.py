@@ -22,7 +22,7 @@ import argparse
 #logging.getLogger('autotvm').setLevel(logging.DEBUG)
 #logging.getLogger('autotvm').addHandler(logging.StreamHandler(sys.stdout))
 
-num_threads = 12
+num_threads = 32
 os.environ["TVM_NUM_THREADS"] = str(num_threads)
 
 def tune_kernels(args, M, N, P, K, trials,
@@ -54,20 +54,20 @@ def tune_kernels(args, M, N, P, K, trials,
 
         if likwid_event != None:
             if random:
-                pickle_file = '/mnt/data/tvm_data/tc/likwid_rand_tc%i_%i_%s_features_%icore_%i_%i.pkl' % (tc_index, N, feature_type, num_threads, trials,  save_ind)
+                pickle_file = 'data/tc/likwid_rand_tc%i_%i_%s_features_%icore_%i_%i.pkl' % (tc_index, N, feature_type, num_threads, trials,  save_ind)
             else:
-                pickle_file = '/mnt/data/tvm_data/tc/likwid_tc%i_%i_%s_features_%icore_%i_%i.pkl' % (tc_index, N, feature_type, num_threads, trials,  save_ind)
+                pickle_file = 'data/tc/likwid_tc%i_%i_%s_features_%icore_%i_%i.pkl' % (tc_index, N, feature_type, num_threads, trials,  save_ind)
         else:
             if random:
-                pickle_file = '/mnt/data/tvm_data/tc/rand_tc%i_%i_%s_features_%icore_%i_%i.pkl' % (tc_index, N, feature_type, num_threads, trials,  save_ind)
+                pickle_file = 'data/tc/rand_tc%i_%i_%s_features_%icore_%i_%i.pkl' % (tc_index, N, feature_type, num_threads, trials,  save_ind)
             else:
-                pickle_file = '/mnt/data/tvm_data/tc/tc%i_%i_new_%s_features_%icore_%i_%i.pkl' % (tc_index, N, feature_type, num_threads, trials,  save_ind)
+                pickle_file = 'data/tc/tc%i_%i_new_%s_features_%icore_%i_%i.pkl' % (tc_index, N, feature_type, num_threads, trials,  save_ind)
         if os.path.exists(pickle_file):
             print('File exists', pickle_file)
             continue
 
         tuner = autotvm.tuner.XGBTuner(task, feature_type=feature_type, loss_type='rank',
-                plan_size=32, sa_n_iter=sa_n_iter, num_threads=24)
+                plan_size=80, sa_n_iter=sa_n_iter)
         tuner.tune(n_trial=trials,
                    measure_option=measure_option,
                    callbacks=[
@@ -93,9 +93,10 @@ def tune_kernels(args, M, N, P, K, trials,
 
 def tune_and_evaluate():
     parser = argparse.ArgumentParser(description='Run conv2d benchmarks in TVM')
+    parser.add_argument( '-b','--benchmark', help="Int. Number of Tensor Contraction benchmark (1-36)", default=1, type=int)
     parser.add_argument( '-f','--feature', help="Type of feature to use, one of 'datavol', 'itervar', 'datavol_itervar', 'itervar_silent_dv'", default='itervar', type=str)
     parser.add_argument( '-n','--num_iters', help="Int. number of times to run training", default=1, type=int)
-    parser.add_argument( '-t','--trials', help="Int. Number of trials to sample", default=1000, type=int)
+    parser.add_argument( '-t','--trials', help="Int. Number of trials to sample", default=2000, type=int)
     parser.add_argument( '-l','--likwid_event', help='Likwid event to capture during training', default=None)
     parser.add_argument( '-r','--random', help="Use XGB+SA to select samples, or randomly select", default=False, action='store_true')
     parser.add_argument( '-k','--key_id', help="Key ID for RPC server.", default=None, type=str)
@@ -104,29 +105,29 @@ def tune_and_evaluate():
 
     args = parser.parse_args()
     trials = args.trials
+    ind = args.benchmark
     global tc_index
-    for size in [280,80]:
+    for size in [80,200,280]:
         #for ind in range(1,37):
         #for ind in [1,16,18,22,24,28,30,33,34,35,36,2]:
-        for ind in [1,16,18]:
-            tc_index = ind
-            print("Tuning TC %i..." % tc_index)
+        tc_index = ind
+        print("Tuning TC %i..." % tc_index)
 
-            M,N,P,K = [size,size,size,size]
+        M,N,P,K = [size,size,size,size]
 
-            tuning_option = {
-                'tuner': 'xgb',
-                'early_stopping': None,
+        tuning_option = {
+            'tuner': 'xgb',
+            'early_stopping': None,
 
-                'measure_option': autotvm.measure_option(
-                    builder=autotvm.LocalBuilder(timeout=10, n_parallel=24 ),
-                    runner=autotvm.LocalRunner(repeat=3,number=4,),
-                ),
-            }
+            'measure_option': autotvm.measure_option(
+                builder=autotvm.LocalBuilder(timeout=10, n_parallel=80),
+                runner=autotvm.LocalRunner(repeat=10,number=4,),
+            ),
+        }
 
 
-            print("M,N,P,K" , M,N,P,K)
-            tune_kernels(args, M,N,P,K, trials, **tuning_option)
+        print("M,N,P,K" , M,N,P,K)
+        tune_kernels(args, M,N,P,K, trials, **tuning_option)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,6 @@ import numpy as np
 from multiprocessing import Pool, cpu_count
 import random
 import string
-from tensors import *
 
 import pickle
 
@@ -18,10 +17,15 @@ from tvm import autotvm
 from tvm.autotvm.tuner import XGBTuner, GATuner, RandomTuner, GridSearchTuner, DataVolumeTuner
 import tvm.contrib.graph_runtime as runtime
 #from tvm.autotvm.task.topi_integration import deserialize_args
-from collections import namedtuple
 from itertools import permutations
 
 import argparse
+
+import subprocess
+cache_sizes = [
+        int(subprocess.run(['getconf', 'LEVEL1_DCACHE_SIZE'], stdout=subprocess.PIPE).stdout),
+        int(subprocess.run(['getconf', 'LEVEL2_CACHE_SIZE'], stdout=subprocess.PIPE).stdout),
+        int(subprocess.run(['getconf', 'LEVEL3_CACHE_SIZE'], stdout=subprocess.PIPE).stdout) ]
 
 #import logging
 #logging.getLogger('autotvm').setLevel(logging.DEBUG)
@@ -34,6 +38,35 @@ os.environ["TVM_NUM_THREADS"] = str(num_threads)
 letters = string.digits + string.ascii_letters
 
 
+def get_extents_info(config, repeat=True):
+    n_n = N
+    ci_n = CI // config['tile_ic'].size[-1]
+    co_n = CO // config['tile_oc'].size[-1]
+    oh_n = H // config['tile_oh'].size[-1]
+    ow_n = W // config['tile_ow'].size[-1]
+    kh_n = KH 
+    kw_n = KW 
+    vci_n = config['tile_ic'].size[-1]
+    vco_n = config['tile_oc'].size[-1]
+    vh_n = config['tile_oh'].size[-1]
+    vw_n = config['tile_ow'].size[-1]
+
+    order = config['reorder_0'].perm
+    extents = [n_n, co_n, oh_n, ow_n, ci_n, vci_n, kh_n, kw_n, vh_n, vw_n, vco_n]
+    array_dims = [ [0,2,3,4,6,7,8,9,5], [1,4,5,6,7,10], [0,1,2,3,8,9,10] ]
+    conv_dims = [ [(2,8), (6,)], [(3,9), (7,)] ]
+    fastest_varying = [ [5], [10], [10]]
+
+    if repeat:
+        for arr in array_dims, fastest_varying:
+            for i in range(len(arr)):
+                arr[i] = (np.array(arr[i])+1).tolist()
+        extents = [50] + extents
+        order = [0] + (np.array(order)+1).tolist()
+
+    return order, extents, array_dims, cache_sizes, conv_dims, fastest_varying
+
+
 def get_tc_dv(ind):
     config = task.config_space.get(ind)
     d_foot, d_vol = autotvm.tuner.data_volume_estimator.estimate_dv(*get_tc_extents_info(M,N,P,K,config,tc_index))
@@ -41,17 +74,8 @@ def get_tc_dv(ind):
 
 def concurrency_ratio(ind):
     config = task.config_space.get(ind)
-    mo_value = np.ceil(M / config['tile_m'].size[-1])
-    no_value = np.ceil(N / config['tile_n'].size[-1])
-    po_value = np.ceil(P / config['tile_p'].size[-1])
 
-    tiles = [mo_value, no_value, po_value]
-
-    concurrency = 1
-    for i in config['reorder_0'].perm:
-        if i == 3:
-            break
-        concurrency *= tiles[i]
+    concurrency = N*CO*H/config['tile_oc'].size[-1]/config['tile_oh'].size[-1]
     return np.floor(concurrency/num_threads) / np.ceil(concurrency/num_threads)
 
 def get_dv(ind):
@@ -140,9 +164,13 @@ def eval_time(ind, module_file):
             s, arg_bufs = task.func(*task.args)
             func = tvm.runtime.load_module(module_file)
 
-        a_np = np.random.uniform(size=(N, N))
-        b_np = np.random.uniform(size=(N, N, N))
-        c_np = np.zeros((N,N,N))
+        d_shape = (N, CI//config['tile_ic'].size[-1], H,W, config['tile_ic'].size[-1])
+        k_shape = (CO//config['tile_oc'].size[-1], CI//config['tile_ic'].size[-1],
+                KH,KW, config['tile_ic'].size[-1], config['tile_oc'].size[-1]) 
+        o_shape = (N, CO//config['tile_oc'].size[-1], H,W, config['tile_oc'].size[-1])
+        a_np = np.random.uniform(size=d_shape)
+        b_np = np.random.uniform(size=k_shape)
+        c_np = np.zeros(o_shape)
         ctx = tvm.cpu()
         a_tvm = tvm.nd.array(a_np.astype(np.float32), ctx=ctx)
         b_tvm = tvm.nd.array(b_np.astype(np.float32), ctx=ctx)
@@ -151,7 +179,10 @@ def eval_time(ind, module_file):
         evaluator = func.time_evaluator(func.entry_name, ctx, repeat=10,number=4,)
         variation = 1
         while variation > 0.05:
-            res = np.array(sorted(evaluator(a_tvm, b_tvm, c_tvm).results)[:-5])
+            if tuple(arg_bufs[1].shape) == b_tvm.shape:
+                res = np.array(sorted(evaluator(c_tvm, b_tvm, a_tvm).results)[:-5])
+            else:
+                res = np.array(sorted(evaluator(c_tvm, a_tvm, b_tvm).results)[:-5])
             variation = res.std() / res.mean()
 
         #if tuple(arg_bufs[1].shape) == b_tvm.shape:
@@ -161,20 +192,33 @@ def eval_time(ind, module_file):
 
         return res.mean(), ind
 
-def tune_kernels(args, trials, cr_limit):
-    
-    func_create = 'template/tc'
+def tune_kernels(args, trials, key, cr_limit):
+    data =  ('TENSOR', (N, CI, H, W), 'float32')
+    kernel = ('TENSOR',(CO, CI, KH, KW), 'float32')
+
+    origin_layout = 'NCHW'
+
+    feature_type = 'itervar'
+    print('Feature:',feature_type)
+
+    func_create = 'conv2d_NCHWc_huge.x86'
 
     global task
     task = autotvm.task.create(func_create, 
-            args=(M,N,P,K,tc_index,'float32'), 
+            args=(data, kernel, strides, padding, 1, origin_layout, origin_layout, 'float32'),
             target='llvm -mcpu=core-avx2')
+
+    if 'NCHWc' in func_create:
+        using_NCHWc = True
+    else:
+        using_NCHWc = False 
+    
     print(task.config_space)
-    outer_trials = min(int(1e9), len(task.config_space))
+    outer_trials = min(int(1e10), len(task.config_space))
     trials = min(trials, len(task.config_space))
 
 
-    pickle_file = 'data/tc/perm%.2f_timed_asm_tc%i_%s_%icore_%i.pkl' % (cr_limit, tc_index, N, num_threads, trials)
+    pickle_file = 'data/conv/perm%.2f_timed_asm_%s_%icore_%i.pkl' % (cr_limit, key, num_threads, trials)
     if os.path.exists(pickle_file):
         print('File exists', pickle_file)
         return
@@ -193,6 +237,7 @@ def tune_kernels(args, trials, cr_limit):
         print(cr[best[:10]])
         #for ind in inds[best[:10]]:
         #    print(task.config_space.get(ind))
+        return
 
     pool_threads = 80#cpu_count()
 
@@ -209,7 +254,7 @@ def tune_kernels(args, trials, cr_limit):
     cr = np.array(cr)[(cr > cr_limit)]
 
     with Pool(pool_threads) as p:
-        dv = p.map(get_tc_dv, configs)
+        dv = p.map(get_dv, configs)
     print('DV for %i configs: %f' % (len(configs), time.time() - tic))
 
     dv = -1*np.array(dv)
@@ -274,85 +319,14 @@ def tune_kernels(args, trials, cr_limit):
                 inds.append(ind)
                 results.append(x)
                 dv.append(dv_dict[ind])
-                #print('Testing: %.2f/%.2f GFLOPS %i/%i  (%i),    %.1f s               \r' % 
-                #        (flops, best_flops, counter, num_configs, 
-                #            build_counter, time.time()-tic), end='')
-                os.remove(module_file)
-                os.remove(module_file+'.so')
-
-    """
-    configs_dict = {key: [ [], [] ] for key in task.config_space.space_map['reorder_0'].entities}
-    for value, config_ind in zip(dv[:int(.3*len(dv))], configs[:int(.3*len(dv))]):
-        con = task.config_space.get(config_ind)
-        configs_dict[con['reorder_0']][0].append(config_ind)
-        configs_dict[con['reorder_0']][1].append(value)
-
-    inds = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-    results = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-    dv = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-    asm_opints = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-    llvm_opints = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-    result_times = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-
-    best_flops = 0.0
-    flops = 0.0
-    counter = 0
-    print('Running on hardware...')
-    for order_ind, order_key in enumerate(configs_dict.keys()):
-        print(order_key)
-        sorted_order = np.array(configs_dict[order_key][1]).argsort()
-        vec_counter = 0
-        to_try = np.array(configs_dict[order_key][0])[sorted_order]
-
-        inds_to_test = []
-        module_files = []
-        build_counter = 0
-        batch_size = 50
-
-        with Pool(pool_threads) as p:
-            for module_file, llvm, asm, ind in p.imap(limited_test, to_try):
-        #for ind in to_try:
-        #        should_test, ind = limited_test(ind)
-                build_counter += 1
-                if len(module_file) > 0:
-                    llvm_opints[order_key].append(llvm)
-                    asm_opints[order_key].append(asm)
-                    inds_to_test.append(ind)
-                    module_files.append(module_file)
-                    vec_counter += 1
-                print('Prepping tests: %.2f/%.2f GFLOPS %i/%i  (%i),    %.1f s               \r' % 
-                        (flops, best_flops, order_ind, len(configs_dict),
-                            build_counter, time.time()-tic), end='')
-                if (build_counter > .2*len(to_try) and len(inds_to_test) == 0) or (build_counter > .5*len(to_try)):
-                    break
-                if len(inds_to_test) >= batch_size:
-                    break
-
-        print()
-        #with Pool(6) as p:
-        #    for x, ind in p.imap(limited_test, to_try):
-        inds_to_test = np.array(inds_to_test)
-        for ind, module_file in zip(inds_to_test, module_files):
-                x, ind = eval_time(ind, module_file)
-                result_times[order_key].append(time.time() - tic)
-                counter += 1
-                mean_time = np.array(x).mean()
-                flops = task.flop/(mean_time*1e9)
-                best_flops = max(flops, best_flops)
-                inds[order_key].append(ind)
-                results[order_key].append(x)
-                dv[order_key].append(dv_dict[ind])
                 print('Testing: %.2f/%.2f GFLOPS %i/%i  (%i),    %.1f s               \r' % 
-                        (flops, best_flops, counter, order_ind, 
+                        (flops, best_flops, counter, num_configs, 
                             build_counter, time.time()-tic), end='')
                 os.remove(module_file)
                 os.remove(module_file+'.so')
-        if len(results) > trials:
-            break
-            """
 
     print()
-    print('Best config:', task.config_space.get(best_ind))
+    print('Best config:', task.config_space.get(best_ind), best_flops)
     print('Saving %s' % pickle_file)
     with open(pickle_file, 'wb') as output:
         pickle.dump([inds, results, dv, result_times, asm_opints, llvm_opints],
@@ -361,33 +335,60 @@ def tune_kernels(args, trials, cr_limit):
 
 def tune_and_evaluate():
 
-    dilation = 1;
+    benchmarks = {
+            #'vision0':[1, 224, 224, 64, 3, 3, 3],
+            #'vision1':[1, 112, 112, 128, 64, 3, 3],
+            #'vision2':[1,  56,  56, 256, 128, 3, 3],
+            #'vision3':[1,  28,  28, 512, 256, 3, 3],
+            #'vision4':[1,  14,  14, 512, 512, 3, 3],
+            #'OCR1':[1,  480,  48, 16, 1, 3, 3],
+            #'OCR2':[1,  240,  24, 32, 16, 3, 3],
+            #'OCR3':[1,  120,  12, 64, 32, 3, 3],
+            #'OCR4':[1,   60,   6, 128, 64, 3, 3],
+            'yolo0':[1, 544, 544, 32, 3, 3, 3],
+            'yolo2':[1, 272, 272, 64, 32, 3, 3],
+            'yolo2_L3':[2, 272, 272, 64, 32, 3, 3],
+            'yolo4':[1, 136, 136, 128, 64, 3, 3],
+            'yolo4_L3':[4, 136, 136, 128, 64, 3, 3],
+            'yolo5':[1, 136, 136, 64, 128, 1, 1],
+            'yolo5_L3':[4, 136, 136, 64, 128, 1, 1],
+            'yolo7':[1,  68,  68, 256, 128, 3, 3],
+            'yolo7_L3':[8,  68,  68, 256, 128, 3, 3],
+            'yolo9':[1,  68,  68, 128, 256, 1, 1],
+            'yolo9_L3':[8,  68,  68, 128, 256, 1, 1],
+            'yolo12':[1, 34, 34, 512, 256, 3, 3],
+            'yolo12_L3':[16, 34, 34, 512, 256, 3, 3],
+            'yolo13':[1, 34, 34, 256, 512, 1, 1],
+            'yolo13_L3':[16, 34, 34, 256, 512, 1, 1],
+            'yolo17':[1, 17, 17, 1024, 512, 3, 3],
+            'yolo17_L3':[32, 17, 17, 1024, 512, 3, 3],
+            'yolo19':[1, 17, 17, 512, 1024, 1, 1],
+            'yolo19_L3':[32, 17, 17, 512, 1024, 1, 1],
+            'yolo23':[1, 17, 17, 28269, 1024, 1, 1],
+            }
 
     parser = argparse.ArgumentParser(description='Run TC benchmarks in TVM')
     parser.add_argument( '-t','--trials', help="Int. Number of trials to sample", default=2000, type=int)
-    parser.add_argument( '-b','--benchmark', help="Int. Number of Tensor Contraction benchmark (1-36)", default=1, type=int)
-
-    global M, N, P, K
-    global tc_index
+    parser.add_argument( '-b','--benchmark', help="Int. Number of Tensor Contraction benchmark (0-19)", default=0, type=int)
 
     args = parser.parse_args()
     trials = args.trials
-    ind = args.benchmark
+    key = list(benchmarks.keys())[args.benchmark]
+
+    global N, H, W, CO, CI, KH, KW 
+    global strides, padding, dilation
+    N, H, W, CO, CI, KH, KW = benchmarks[key]
+    strides, padding, dilation =  1, 1, 1
+    if KH == 1:
+        padding = 0
+
     cr_limit = 0.9
 
-    for size in [80,200,280]:
-        tc_index = ind
-
-        print("Tuning TC %i..." % tc_index)
-        #key = list(benchmarks.keys())[args.benchmark]
-
-        M,N,P,K = [size,size,size,size]
-        
-
-        print("M, N, P, K")
-        print(M, N, P, K)
-        tune_kernels(args, trials, cr_limit)
+    print("N, H, W, CO, CI, KH, KW, strides, padding \n" , N, H, W, CO, CI, KH, KW, strides, padding)
+    tune_kernels(args, trials, key, cr_limit)
 
 
 if __name__ == "__main__":
     tune_and_evaluate()
+
+

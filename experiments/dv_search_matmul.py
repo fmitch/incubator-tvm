@@ -34,24 +34,18 @@ os.environ["TVM_NUM_THREADS"] = str(num_threads)
 letters = string.digits + string.ascii_letters
 
 
-def get_tc_dv(ind):
+def get_matmul_dv(ind):
     config = task.config_space.get(ind)
-    d_foot, d_vol = autotvm.tuner.data_volume_estimator.estimate_dv(*get_tc_extents_info(M,N,P,K,config,tc_index))
+    d_foot, d_vol = autotvm.tuner.data_volume_estimator.estimate_dv(*get_matmul_extents_info(M,N,K,config,matmul_index))
     return -1*(d_vol[2][:,:,-1].sum(axis=0) * np.array([64/100e9, 64/44e9, 64/25e9])).sum()
 
 def concurrency_ratio(ind):
     config = task.config_space.get(ind)
     mo_value = np.ceil(M / config['tile_m'].size[-1])
     no_value = np.ceil(N / config['tile_n'].size[-1])
-    po_value = np.ceil(P / config['tile_p'].size[-1])
 
-    tiles = [mo_value, no_value, po_value]
+    concurrency = mo_value * no_value
 
-    concurrency = 1
-    for i in config['reorder_0'].perm:
-        if i == 3:
-            break
-        concurrency *= tiles[i]
     return np.floor(concurrency/num_threads) / np.ceil(concurrency/num_threads)
 
 def get_dv(ind):
@@ -141,8 +135,8 @@ def eval_time(ind, module_file):
             func = tvm.runtime.load_module(module_file)
 
         a_np = np.random.uniform(size=(N, N))
-        b_np = np.random.uniform(size=(N, N, N))
-        c_np = np.zeros((N,N,N))
+        b_np = np.random.uniform(size=(N, N))
+        c_np = np.zeros((N,N))
         ctx = tvm.cpu()
         a_tvm = tvm.nd.array(a_np.astype(np.float32), ctx=ctx)
         b_tvm = tvm.nd.array(b_np.astype(np.float32), ctx=ctx)
@@ -163,18 +157,18 @@ def eval_time(ind, module_file):
 
 def tune_kernels(args, trials, cr_limit):
     
-    func_create = 'template/tc'
+    func_create = 'template/matmul'
 
     global task
     task = autotvm.task.create(func_create, 
-            args=(M,N,P,K,tc_index,'float32'), 
+            args=(M,N,K,matmul_index,'float32'), 
             target='llvm -mcpu=core-avx2')
     print(task.config_space)
     outer_trials = min(int(1e9), len(task.config_space))
     trials = min(trials, len(task.config_space))
 
 
-    pickle_file = 'data/tc/perm%.2f_timed_asm_tc%i_%s_%icore_%i.pkl' % (cr_limit, tc_index, N, num_threads, trials)
+    pickle_file = 'data/matmul/perm%.2f_timed_asm_matmul%i_%s_%icore_%i.pkl' % (cr_limit, matmul_index, N, num_threads, trials)
     if os.path.exists(pickle_file):
         print('File exists', pickle_file)
         return
@@ -193,6 +187,7 @@ def tune_kernels(args, trials, cr_limit):
         print(cr[best[:10]])
         #for ind in inds[best[:10]]:
         #    print(task.config_space.get(ind))
+        return
 
     pool_threads = 80#cpu_count()
 
@@ -209,7 +204,7 @@ def tune_kernels(args, trials, cr_limit):
     cr = np.array(cr)[(cr > cr_limit)]
 
     with Pool(pool_threads) as p:
-        dv = p.map(get_tc_dv, configs)
+        dv = p.map(get_matmul_dv, configs)
     print('DV for %i configs: %f' % (len(configs), time.time() - tic))
 
     dv = -1*np.array(dv)
@@ -280,76 +275,6 @@ def tune_kernels(args, trials, cr_limit):
                 os.remove(module_file)
                 os.remove(module_file+'.so')
 
-    """
-    configs_dict = {key: [ [], [] ] for key in task.config_space.space_map['reorder_0'].entities}
-    for value, config_ind in zip(dv[:int(.3*len(dv))], configs[:int(.3*len(dv))]):
-        con = task.config_space.get(config_ind)
-        configs_dict[con['reorder_0']][0].append(config_ind)
-        configs_dict[con['reorder_0']][1].append(value)
-
-    inds = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-    results = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-    dv = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-    asm_opints = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-    llvm_opints = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-    result_times = {key: [] for key in task.config_space.space_map['reorder_0'].entities}
-
-    best_flops = 0.0
-    flops = 0.0
-    counter = 0
-    print('Running on hardware...')
-    for order_ind, order_key in enumerate(configs_dict.keys()):
-        print(order_key)
-        sorted_order = np.array(configs_dict[order_key][1]).argsort()
-        vec_counter = 0
-        to_try = np.array(configs_dict[order_key][0])[sorted_order]
-
-        inds_to_test = []
-        module_files = []
-        build_counter = 0
-        batch_size = 50
-
-        with Pool(pool_threads) as p:
-            for module_file, llvm, asm, ind in p.imap(limited_test, to_try):
-        #for ind in to_try:
-        #        should_test, ind = limited_test(ind)
-                build_counter += 1
-                if len(module_file) > 0:
-                    llvm_opints[order_key].append(llvm)
-                    asm_opints[order_key].append(asm)
-                    inds_to_test.append(ind)
-                    module_files.append(module_file)
-                    vec_counter += 1
-                print('Prepping tests: %.2f/%.2f GFLOPS %i/%i  (%i),    %.1f s               \r' % 
-                        (flops, best_flops, order_ind, len(configs_dict),
-                            build_counter, time.time()-tic), end='')
-                if (build_counter > .2*len(to_try) and len(inds_to_test) == 0) or (build_counter > .5*len(to_try)):
-                    break
-                if len(inds_to_test) >= batch_size:
-                    break
-
-        print()
-        #with Pool(6) as p:
-        #    for x, ind in p.imap(limited_test, to_try):
-        inds_to_test = np.array(inds_to_test)
-        for ind, module_file in zip(inds_to_test, module_files):
-                x, ind = eval_time(ind, module_file)
-                result_times[order_key].append(time.time() - tic)
-                counter += 1
-                mean_time = np.array(x).mean()
-                flops = task.flop/(mean_time*1e9)
-                best_flops = max(flops, best_flops)
-                inds[order_key].append(ind)
-                results[order_key].append(x)
-                dv[order_key].append(dv_dict[ind])
-                print('Testing: %.2f/%.2f GFLOPS %i/%i  (%i),    %.1f s               \r' % 
-                        (flops, best_flops, counter, order_ind, 
-                            build_counter, time.time()-tic), end='')
-                os.remove(module_file)
-                os.remove(module_file+'.so')
-        if len(results) > trials:
-            break
-            """
 
     print()
     print('Best config:', task.config_space.get(best_ind))
@@ -365,27 +290,27 @@ def tune_and_evaluate():
 
     parser = argparse.ArgumentParser(description='Run TC benchmarks in TVM')
     parser.add_argument( '-t','--trials', help="Int. Number of trials to sample", default=2000, type=int)
-    parser.add_argument( '-b','--benchmark', help="Int. Number of Tensor Contraction benchmark (1-36)", default=1, type=int)
+    parser.add_argument( '-b','--benchmark', help="Int. Number of Tensor Contraction benchmark (1-4)", default=1, type=int)
 
-    global M, N, P, K
-    global tc_index
+    global M, N, K
+    global matmul_index
 
     args = parser.parse_args()
     trials = args.trials
     ind = args.benchmark
     cr_limit = 0.9
 
-    for size in [80,200,280]:
-        tc_index = ind
+    for size in [1000,4000]:
+        matmul_index = ind
 
-        print("Tuning TC %i..." % tc_index)
+        print("Tuning TC %i..." % matmul_index)
         #key = list(benchmarks.keys())[args.benchmark]
 
-        M,N,P,K = [size,size,size,size]
+        M,N,K = [size,size,size]
         
 
-        print("M, N, P, K")
-        print(M, N, P, K)
+        print("M, N, K")
+        print(M, N, K)
         tune_kernels(args, trials, cr_limit)
 
 

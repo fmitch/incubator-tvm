@@ -10,19 +10,24 @@ cache_sizes = [
         int(subprocess.run(['getconf', 'LEVEL2_CACHE_SIZE'], stdout=subprocess.PIPE).stdout),
         int(subprocess.run(['getconf', 'LEVEL3_CACHE_SIZE'], stdout=subprocess.PIPE).stdout)]
 
+def get_matmul_extents_info(M,N,K,config,matmul_index,repeat=True):
+    array_dict = {
+            1: ( [ [0,2,3,5], [1,2,4,5], [0,1,3,4]], [[2,5],[2,5],[1,4]] ),
+            2: ( [ [0,2,3,5], [1,2,5,4], [0,1,3,4]], [[2,5],[1,4],[1,4]] ),
+            3: ( [ [0,2,5,3], [1,2,4,5], [0,1,3,4]], [[0,3],[2,5],[1,4]] ),
+            4: ( [ [0,2,5,3], [1,2,5,4], [0,1,3,4]], [[0,3],[1,4],[1,4]] ),
+            }
 
-def get_matmul_extents_info(N,M,L,config, repeat=True):
-    yo_value = N // config['tile_i'].size[-1]
-    xo_value = M // config['tile_j'].size[-1]
-    ko_value = L // config['tile_k'].size[-1]
-    yi_value = config['tile_i'].size[-1]
-    xi_value = config['tile_j'].size[-1]
+    mo_value = np.ceil(M / config['tile_m'].size[-1])
+    no_value = np.ceil(N / config['tile_n'].size[-1])
+    ko_value = np.ceil(K / config['tile_k'].size[-1])
+    mi_value = config['tile_m'].size[-1]
+    ni_value = config['tile_n'].size[-1]
     ki_value = config['tile_k'].size[-1]
     order = config['reorder_0'].perm
-    extents = [yo_value, xo_value, ko_value, yi_value, xi_value, ki_value]
-    array_dims = [ [0, 2, 3, 5], [1,2,5,4], [0,1,3,4]]
+    extents = [mo_value, no_value, ko_value, mi_value, ni_value, ki_value]
+    array_dims, fastest_varying = array_dict[matmul_index]
     conv_dims = []
-    fastest_varying = [[5],[4],[4]]
     arrays = ['A', 'B', 'C']
 
     if repeat:
@@ -35,46 +40,76 @@ def get_matmul_extents_info(N,M,L,config, repeat=True):
     return order, extents, array_dims, cache_sizes, conv_dims, fastest_varying, arrays
 
 @autotvm.template("template/matmul")
-def matmul(N, L, M, dtype):
-    A = te.placeholder((N, L), name='A', dtype=dtype)
-    B = te.placeholder((L, M), name='B', dtype=dtype)
+def matmul(M,N,K,matmul_index, dtype):
+    A = te.placeholder((K,M), name='A', dtype=dtype)
+    B = te.placeholder((N,K), name='B', dtype=dtype)
 
-    k = te.reduce_axis((0, L), name='k')
-    C = te.compute((N, M), lambda i, j: te.sum(A[i, k] * B[k, j], axis=k), name='C')
+    k = te.reduce_axis((0, K), name='k')
+
+    lambda_dict = { 
+            1:lambda m,n: te.sum(A[m,k] * B[n,k], axis=k),
+            2:lambda m,n: te.sum(A[m,k] * B[k,n], axis=k),
+            3:lambda m,n: te.sum(A[k,m] * B[n,k], axis=k),
+            4:lambda m,n: te.sum(A[k,m] * B[k,n], axis=k),
+            }
+
+    return matmul_template(M,N,K, A,B,k, lambda_dict[matmul_index], matmul_index, dtype)
+
+def matmul_template(M,N,K, A,B,k,lambda_func, matmul_index, dtype):
+    C = te.compute((M,N), lambda_func, name='C')
     s = te.create_schedule(C.op)
 
     # schedule
-    i, j = s[C].op.axis
+    m,n = s[C].op.axis
     k = s[C].op.reduce_axis[0]
 
     ##### define space begin #####
     cfg = autotvm.get_config()
-    io, ii = cfg.define_split("tile_i", i, num_outputs=2)
-    jo, ji = cfg.define_split("tile_j", j, num_outputs=2, filter=lambda y: y.size[-1] % 8 == 0, policy='verbose')
-    ko, ki = cfg.define_split("tile_k", k, num_outputs=2)
+    mo, mi = cfg.define_split("tile_m", m, num_outputs=2, policy='verbose')
+    no, ni = cfg.define_split("tile_n", n, num_outputs=2, policy='verbose')
+    ko, ki = cfg.define_split("tile_k", k, num_outputs=2, policy='verbose')
 
-    order = [io, jo, ko, ii, ji, ki]
+    order = [mo, no, ko, mi, ni, ki] 
     perms = []
-    for start in permutations([io, jo, ko]):
-        for end in permutations([ii, ji, ki]):
-            perms.append(list(start)+list(end))
+    #for start in permutations([mo, no, po, ko]):
+    start = [mo, no, ko]
+    for end in permutations([mi, ni, ki]):
+        perms.append(list(start)+list(end))
+
     cfg.define_reorder('reorder_0', order,
             policy='candidate', candidate=perms)
     ##### define space end #####
 
     # schedule according to config
-    io, ii = cfg["tile_i"].apply(s, C, i)
-    jo, ji = cfg["tile_j"].apply(s, C, j)
+    mo, mi = cfg["tile_m"].apply(s, C, m)
+    no, ni = cfg["tile_n"].apply(s, C, n)
     ko, ki = cfg["tile_k"].apply(s, C, k)
-    order = [io, jo, ko, ii, ji, ki]
+    order = [mo, no, ko, mi, ni, ki] 
     cfg['reorder_0'].apply(s, C, order)
 
-    parallel_axis = order[cfg['reorder_0'][0]]
+    #to_parallel = []
+    #for i in cfg['reorder_0'].perm:
+    #    if i == 3:
+    #        break
+    #    to_parallel.append(order[i])
+    #parallel_axis = s[C].fuse(*to_parallel)
+
+    parallel_axis = s[C].fuse(mo,no)
     s[C].parallel(parallel_axis)
 
-    _, cfg.extents, cfg.array_dims, _, cfg.conv_dims, cfg.fastest_varying, cfg.arrays = get_matmul_extents_info(cfg)
+    _, cfg.extents, cfg.array_dims, _, cfg.conv_dims, cfg.fastest_varying, cfg.arrays = get_matmul_extents_info(M,N,K,cfg, matmul_index)
 
     return s, [A, B, C]
+
+
+
+
+
+
+
+
+
+
 
 def get_tc_extents_info(M,N,P,K,config,tc_index,repeat=True):
     array_dict = {
